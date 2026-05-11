@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Maple History</title>
+    <style>
+        :root {
+            color-scheme: light;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            color: #1b1f24;
+            background: #f6f8fb;
+        }
+
+        body {
+            margin: 0;
+        }
+
+        main {
+            max-width: 1040px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        h1 {
+            margin: 0 0 24px;
+            font-size: 30px;
+            letter-spacing: 0;
+        }
+
+        form {
+            display: grid;
+            grid-template-columns: minmax(180px, 1fr) 150px 150px 140px auto;
+            gap: 10px;
+            align-items: end;
+            margin-bottom: 22px;
+        }
+
+        label {
+            display: grid;
+            gap: 6px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #49515c;
+        }
+
+        input,
+        select,
+        button {
+            height: 42px;
+            border-radius: 6px;
+            border: 1px solid #cbd3df;
+            padding: 0 12px;
+            font: inherit;
+            background: white;
+            box-sizing: border-box;
+        }
+
+        button {
+            border-color: #2456d6;
+            background: #2456d6;
+            color: white;
+            font-weight: 800;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            opacity: 0.55;
+            cursor: wait;
+        }
+
+        .status {
+            min-height: 24px;
+            margin-bottom: 12px;
+            color: #596270;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: white;
+            border: 1px solid #dbe1ea;
+        }
+
+        th,
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #e6ebf2;
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        th:first-child,
+        td:first-child {
+            text-align: left;
+        }
+
+        th {
+            background: #eef2f7;
+            color: #374151;
+            font-size: 13px;
+        }
+
+        .empty {
+            padding: 28px;
+            text-align: center;
+            color: #697386;
+            background: white;
+            border: 1px solid #dbe1ea;
+        }
+
+        @media (max-width: 860px) {
+            form {
+                grid-template-columns: 1fr 1fr;
+            }
+
+            button {
+                grid-column: 1 / -1;
+            }
+
+            .table-wrap {
+                overflow-x: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+<main>
+    <h1>Maple History</h1>
+
+    <form id="search-form">
+        <label>
+            캐릭터 이름
+            <input id="character-name" name="characterName" value="어센트심볼" autocomplete="off" required>
+        </label>
+        <label>
+            시작일
+            <input id="from-date" name="from" type="date" required>
+        </label>
+        <label>
+            종료일
+            <input id="to-date" name="to" type="date" required>
+        </label>
+        <label>
+            프리셋
+            <select id="mode" name="mode">
+                <option value="CURRENT">현재 장착</option>
+                <option value="MAX">최대 전투력</option>
+                <option value="PRESET_1">프리셋 1</option>
+                <option value="PRESET_2">프리셋 2</option>
+                <option value="PRESET_3">프리셋 3</option>
+            </select>
+        </label>
+        <button id="submit-button" type="submit">조회</button>
+    </form>
+
+    <div id="status" class="status"></div>
+    <div id="results" class="empty">캐릭터 이름과 날짜를 입력하고 조회하세요.</div>
+</main>
+
+<script>
+    const form = document.querySelector("#search-form");
+    const statusEl = document.querySelector("#status");
+    const resultsEl = document.querySelector("#results");
+    const submitButton = document.querySelector("#submit-button");
+    const fromDate = document.querySelector("#from-date");
+    const toDate = document.querySelector("#to-date");
+
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yyyyMmDd = yesterday.toISOString().slice(0, 10);
+    fromDate.value = yyyyMmDd;
+    toDate.value = yyyyMmDd;
+
+    const numberFormat = new Intl.NumberFormat("ko-KR");
+    const percentFormat = new Intl.NumberFormat("ko-KR", {
+        style: "percent",
+        maximumFractionDigits: 2
+    });
+
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const data = new FormData(form);
+        const characterName = data.get("characterName").trim();
+        const query = new URLSearchParams({
+            from: data.get("from"),
+            to: data.get("to"),
+            mode: data.get("mode")
+        });
+
+        submitButton.disabled = true;
+        statusEl.textContent = "조회 중...";
+        resultsEl.className = "empty";
+        resultsEl.textContent = "Nexon API에서 데이터를 가져오고 있습니다.";
+
+        try {
+            const response = await fetch(`/api/v1/characters/${encodeURIComponent(characterName)}/combat-power/trend?${query}`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const body = await response.json();
+            renderResults(body);
+            statusEl.textContent = `${body.characterName} (${body.from} ~ ${body.to})`;
+        } catch (error) {
+            statusEl.textContent = "조회에 실패했습니다.";
+            resultsEl.className = "empty";
+            resultsEl.textContent = error.message;
+        } finally {
+            submitButton.disabled = false;
+        }
+    });
+
+    function renderResults(body) {
+        if (!body.points || body.points.length === 0) {
+            resultsEl.className = "empty";
+            resultsEl.textContent = "조회 결과가 없습니다.";
+            return;
+        }
+
+        resultsEl.className = "table-wrap";
+        resultsEl.innerHTML = `
+            <table>
+                <thead>
+                <tr>
+                    <th>날짜</th>
+                    <th>사용 프리셋</th>
+                    <th>소스별 프리셋</th>
+                    <th>계산 전투력</th>
+                    <th>Nexon 전투력</th>
+                    <th>차이</th>
+                    <th>오차율</th>
+                </tr>
+                </thead>
+                <tbody>
+                ${body.points.map(point => `
+                    <tr>
+                        <td>${point.date}</td>
+                        <td>${point.selectedPresetNo}</td>
+                        <td>${formatSourcePresets(point.selectedSourcePresetNos)}</td>
+                        <td>${numberFormat.format(point.calculatedCombatPower)}</td>
+                        <td>${formatNullable(point.nexonCurrentCombatPower)}</td>
+                        <td>${formatNullable(point.verificationDelta)}</td>
+                        <td>${point.verificationDeltaRate == null ? "-" : percentFormat.format(point.verificationDeltaRate)}</td>
+                    </tr>
+                `).join("")}
+                </tbody>
+            </table>
+        `;
+    }
+
+    function formatNullable(value) {
+        return value == null ? "-" : numberFormat.format(value);
+    }
+
+    function formatSourcePresets(sourcePresetNos) {
+        if (!sourcePresetNos) {
+            return "-";
+        }
+        const labels = {
+            ITEM_EQUIPMENT: "장비",
+            CASH_ITEM_EQUIPMENT: "캐시",
+            HYPER_STAT: "하이퍼",
+            ABILITY: "어빌",
+            UNION_RAIDER: "유니온"
+        };
+        return Object.entries(sourcePresetNos)
+            .map(([source, presetNo]) => `${labels[source] || source} ${presetNo}`)
+            .join(" / ");
+    }
+</script>
+</body>
+</html>
