@@ -24,10 +24,10 @@ public class CombatPowerFormula {
 
         long attackBase = profile.usesMagicAttack()
                 ? stats.flat(CombatStatKey.MAGIC_ATTACK)
-                : Math.max(stats.flat(CombatStatKey.ATTACK_POWER), stats.flat(CombatStatKey.MAGIC_ATTACK));
+                : stats.flat(CombatStatKey.ATTACK_POWER);
         double attackPercent = profile.usesMagicAttack()
                 ? stats.percent(CombatStatKey.MAGIC_ATTACK)
-                : Math.max(stats.percent(CombatStatKey.ATTACK_POWER), stats.percent(CombatStatKey.MAGIC_ATTACK));
+                : stats.percent(CombatStatKey.ATTACK_POWER);
         long attack = (long) Math.floor(attackBase * (1 + attackPercent / 100.0d));
 
         double statFactor = (mainStat * 4.0d + subStat) / 100.0d;

@@ -76,14 +76,26 @@ public class CombatPowerService {
         Integer characterLevel = characterLevel(snapshot).orElse(null);
         PresetStatBundle bundle = statExtractor.extract(snapshot.documents(), characterClass);
         Map<String, Integer> currentPresetNos = currentPresetNos(snapshot);
-        List<PresetCombatPower> candidates = candidates(bundle, characterClass, characterLevel, currentPresetNos, mode);
+        List<PresetCombatPower> candidates = candidates(snapshot, bundle, characterClass, characterLevel, currentPresetNos, mode);
         PresetCombatPower selected = selectCandidate(candidates, mode);
+        CombatStatBag selectedStats = bundle.merged(selected.sourcePresetNos());
         Long nexonCombatPower = finalStatCombatPower(snapshot.document(NexonEndpoint.STAT)).orElse(null);
-        boolean currentPresetSelected = selected.sourcePresetNos().equals(currentPresetNos) || mode == PresetSelectionMode.CURRENT;
+        boolean currentPresetSelected = selected.sourcePresetNos().equals(currentPresetNos)
+                || mode == PresetSelectionMode.CURRENT;
         Long delta = nexonCombatPower == null || !currentPresetSelected ? null : selected.combatPower() - nexonCombatPower;
         Double deltaRate = delta == null || nexonCombatPower == 0
                 ? null
                 : delta / (double) nexonCombatPower;
+        printSelectedStatDebug(
+                "(web trend)",
+                snapshot,
+                mode,
+                selected,
+                selectedStats,
+                nexonCombatPower,
+                delta,
+                deltaRate
+        );
 
         List<String> warnings = warnings(snapshot, currentPresetNos, nexonCombatPower, currentPresetSelected);
         return new CombatPowerPoint(
@@ -106,12 +118,24 @@ public class CombatPowerService {
         Integer characterLevel = characterLevel(snapshot).orElse(null);
         PresetStatBundle bundle = statExtractor.extract(snapshot.documents(), characterClass);
         Map<String, Integer> currentPresetNos = currentPresetNos(snapshot);
-        List<PresetCombatPower> candidates = candidates(bundle, characterClass, characterLevel, currentPresetNos, mode);
+        List<PresetCombatPower> candidates = candidates(snapshot, bundle, characterClass, characterLevel, currentPresetNos, mode);
         PresetCombatPower selected = selectCandidate(candidates, mode);
         CombatStatBag selectedStats = bundle.merged(selected.sourcePresetNos());
         Long nexonCombatPower = finalStatCombatPower(snapshot.document(NexonEndpoint.STAT)).orElse(null);
-        Long delta = nexonCombatPower == null ? null : selected.combatPower() - nexonCombatPower;
+        boolean currentPresetSelected = selected.sourcePresetNos().equals(currentPresetNos)
+                || mode == PresetSelectionMode.CURRENT;
+        Long delta = nexonCombatPower == null || !currentPresetSelected ? null : selected.combatPower() - nexonCombatPower;
         Double deltaRate = delta == null || nexonCombatPower == 0 ? null : delta / (double) nexonCombatPower;
+        printSelectedStatDebug(
+                characterName,
+                snapshot,
+                mode,
+                selected,
+                selectedStats,
+                nexonCombatPower,
+                delta,
+                deltaRate
+        );
 
         return new CombatPowerDebugResponse(
                 characterName,
@@ -179,6 +203,7 @@ public class CombatPowerService {
     }
 
     private List<PresetCombatPower> candidates(
+            NexonCharacterSnapshot snapshot,
             PresetStatBundle bundle,
             String characterClass,
             Integer characterLevel,
@@ -193,6 +218,8 @@ public class CombatPowerService {
             if (combinations.isEmpty()) {
                 combinations.add(Map.of());
             }
+        } else if (mode == PresetSelectionMode.BATTLE) {
+            combinations.add(battlePresetNos(snapshot, bundle, currentPresetNos, characterClass, characterLevel));
         } else {
             int presetNo = mode.presetNoOrZero();
             Map<String, Integer> selected = new LinkedHashMap<>();
@@ -233,6 +260,213 @@ public class CombatPowerService {
             buildCombinations(sources, bundle, index + 1, current, results);
         }
         current.remove(source);
+    }
+
+    private Map<String, Integer> battlePresetNos(
+            NexonCharacterSnapshot snapshot,
+            PresetStatBundle bundle,
+            Map<String, Integer> currentPresetNos,
+            String characterClass,
+            Integer characterLevel
+    ) {
+        Map<String, Integer> selected = new LinkedHashMap<>();
+        for (String source : bundle.sources()) {
+            if ("UNION_RAIDER".equals(source)) {
+                continue;
+            }
+            Optional<Integer> best = bundle.sourcePresetNos(source).stream()
+                    .min(Comparator
+                            .comparingInt((Integer presetNo) -> -battlePresetScore(snapshot, source, presetNo, characterClass))
+                            .thenComparingInt(presetNo -> currentPresetNos.getOrDefault(source, -1).equals(presetNo) ? 0 : 1)
+                    .thenComparingInt(Integer::intValue));
+            best.ifPresent(presetNo -> selected.put(source, presetNo));
+        }
+        if (bundle.sources().contains("UNION_RAIDER")) {
+            Optional<Integer> bestUnion = bundle.sourcePresetNos("UNION_RAIDER").stream()
+                    .min(Comparator
+                            .comparingLong((Integer presetNo) -> -combatPowerWithPreset(bundle, selected, "UNION_RAIDER", presetNo, characterClass, characterLevel))
+                            .thenComparingInt(presetNo -> -battlePresetScore(snapshot, "UNION_RAIDER", presetNo, characterClass))
+                            .thenComparingInt(presetNo -> currentPresetNos.getOrDefault("UNION_RAIDER", -1).equals(presetNo) ? 0 : 1)
+                            .thenComparingInt(Integer::intValue));
+            bestUnion.ifPresent(presetNo -> selected.put("UNION_RAIDER", presetNo));
+        }
+        return selected;
+    }
+
+    private long combatPowerWithPreset(
+            PresetStatBundle bundle,
+            Map<String, Integer> selected,
+            String source,
+            int presetNo,
+            String characterClass,
+            Integer characterLevel
+    ) {
+        Map<String, Integer> candidate = new LinkedHashMap<>(selected);
+        candidate.put(source, presetNo);
+        return formula.calculate(characterClass, characterLevel, bundle.merged(candidate)).combatPower();
+    }
+
+    private int battlePresetScore(NexonCharacterSnapshot snapshot, String source, int presetNo, String characterClass) {
+        return switch (source) {
+            case "ITEM_EQUIPMENT" -> itemBattleScore(snapshot.document(NexonEndpoint.ITEM_EQUIPMENT), presetNo);
+            case "HYPER_STAT" -> hyperStatBattleScore(snapshot.document(NexonEndpoint.HYPER_STAT), presetNo);
+            case "ABILITY" -> abilityBattleScore(snapshot.document(NexonEndpoint.ABILITY), presetNo, characterClass);
+            case "UNION_RAIDER" -> unionBattleScore(snapshot.document(NexonEndpoint.UNION_RAIDER), presetNo);
+            default -> 0;
+        };
+    }
+
+    private int itemBattleScore(JsonNode document, int presetNo) {
+        JsonNode items = document == null ? null : document.get("item_equipment_preset_" + presetNo);
+        if (items == null || !items.isArray()) {
+            return 0;
+        }
+        int score = 0;
+        for (JsonNode item : items) {
+            String name = item.path("item_name").asText("");
+            String part = item.path("item_equipment_part").asText("");
+            String slot = item.path("item_equipment_slot").asText("");
+            String text = flattenText(item);
+            if (containsAny(text, "컨티뉴어스 링", "리스트레인트 링", "웨폰퍼프", "리스크테이커", "링 오브 썸", "크라이시스", "리밋링", "레벨퍼프", "얼티메이덤")) {
+                score += 80;
+            }
+            if (containsAny(text, "아이템 드롭률", "메소 획득량", "획득 경험치", "드롭률")) {
+                score -= 80;
+            }
+            if (name.contains("하프 이어링")) {
+                score -= 60;
+            }
+            if (name.contains("정령의 펜던트")) {
+                score -= 60;
+            }
+            if ((slot.contains("눈장식") || part.contains("눈장식")) && containsAny(name, "안경", "안대")) {
+                score -= 20;
+            }
+            if ((slot.contains("얼굴장식") || part.contains("얼굴장식")) && name.contains("심볼")) {
+                score -= 30;
+            }
+        }
+        return score;
+    }
+
+    private int hyperStatBattleScore(JsonNode document, int presetNo) {
+        JsonNode stats = document == null ? null : document.get("hyper_stat_preset_" + presetNo);
+        if (stats == null || !stats.isArray()) {
+            return 0;
+        }
+        int score = 0;
+        for (JsonNode stat : stats) {
+            String type = stat.path("stat_type").asText("");
+            int level = intField(stat, "stat_level").orElse(0);
+            int point = intField(stat, "stat_point").orElse(0);
+            int invested = Math.max(level, point);
+            if (containsAny(type, "보스 몬스터 데미지", "데미지", "크리티컬 데미지", "방어율 무시", "공격력/마력", "STR", "DEX", "INT", "LUK")) {
+                score += invested * 4;
+            }
+            if (type.contains("방어율 무시") && invested > 0) {
+                score += 20;
+            }
+            if (containsAny(type, "경험치", "일반 몬스터 데미지", "아케인포스") && invested >= 4) {
+                score -= invested * 8;
+            }
+            if (containsAny(type, "미투자", "잔여") && invested > 20) {
+                score -= invested;
+            }
+        }
+        return score;
+    }
+
+    private int abilityBattleScore(JsonNode document, int presetNo, String characterClass) {
+        JsonNode preset = document == null ? null : document.get("ability_preset_" + presetNo);
+        JsonNode abilities = preset == null ? null : preset.get("ability_info");
+        if (abilities == null || !abilities.isArray()) {
+            return 0;
+        }
+        boolean archer = containsAny(characterClass, "보우마스터", "신궁", "패스파인더", "윈드브레이커", "와일드헌터", "메르세데스", "카인");
+        int score = 0;
+        for (JsonNode ability : abilities) {
+            String value = ability.path("ability_value").asText("");
+            int amount = firstNumber(value).orElse(0);
+            if (value.contains("보스 몬스터")) {
+                score += 100 + amount;
+            } else if (containsAny(value, "공격력", "마력")) {
+                score += 50 + amount;
+            } else if (value.contains("크리티컬 확률")) {
+                score += archer ? 30 + amount : -20;
+            } else if (containsAny(value, "버프 지속", "재사용")) {
+                score += 10 + amount;
+            } else if (containsAny(value, "아이템 드롭", "메소", "획득 경험치")) {
+                score -= 80;
+            }
+        }
+        return score;
+    }
+
+    private int unionBattleScore(JsonNode document, int presetNo) {
+        JsonNode preset = document == null ? null : document.get("union_raider_preset_" + presetNo);
+        if (preset == null || preset.isNull()) {
+            return 0;
+        }
+        int score = 0;
+        score += unionTextScore(preset.get("union_raider_stat"), false);
+        score += unionTextScore(preset.get("union_occupied_stat"), true);
+        JsonNode blocks = preset.get("union_block");
+        if (blocks != null && blocks.isArray()) {
+            score += blocks.size();
+        }
+        return score;
+    }
+
+    private int unionTextScore(JsonNode values, boolean occupied) {
+        if (values == null || !values.isArray()) {
+            return 0;
+        }
+        int score = 0;
+        for (JsonNode value : values) {
+            String text = value.asText("");
+            int amount = firstNumber(text).orElse(0);
+            if (text.contains("보스 몬스터")) {
+                score += 100 + amount;
+            } else if (text.contains("크리티컬 데미지")) {
+                score += 80 + amount;
+            } else if (containsAny(text, "공격력", "마력")) {
+                score += 40 + amount;
+            } else if (containsAny(text, "STR", "DEX", "INT", "LUK")) {
+                score += occupied ? 20 + amount : 5 + amount;
+            } else if (containsAny(text, "일반 몬스터", "경험치", "메소", "버프 지속", "최대 MP", "이동속도")) {
+                score -= 40 + amount;
+            }
+        }
+        return score;
+    }
+
+    private String flattenText(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return "";
+        }
+        if (node.isTextual()) {
+            return node.asText();
+        }
+        StringBuilder builder = new StringBuilder();
+        if (node.isArray()) {
+            for (JsonNode child : node) {
+                builder.append(' ').append(flattenText(child));
+            }
+        } else if (node.isObject()) {
+            for (String name : node.propertyNames()) {
+                builder.append(' ').append(flattenText(node.get(name)));
+            }
+        }
+        return builder.toString();
+    }
+
+    private boolean containsAny(String source, String... needles) {
+        for (String needle : needles) {
+            if (source.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private Map<String, Long> longMap(Map<CombatStatKey, Long> source) {
@@ -299,6 +533,31 @@ public class CombatPowerService {
         }
     }
 
+    private Optional<Integer> firstNumber(String value) {
+        if (value == null) {
+            return Optional.empty();
+        }
+        StringBuilder digits = new StringBuilder();
+        boolean found = false;
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (Character.isDigit(ch)) {
+                digits.append(ch);
+                found = true;
+            } else if (found) {
+                break;
+            }
+        }
+        if (digits.isEmpty()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Integer.parseInt(digits.toString()));
+        } catch (NumberFormatException ignored) {
+            return Optional.empty();
+        }
+    }
+
     private Optional<Long> finalStatCombatPower(JsonNode stat) {
         if (stat == null || stat.isNull() || !stat.has("final_stat")) {
             return Optional.empty();
@@ -331,23 +590,27 @@ public class CombatPowerService {
         return warnings;
     }
 
-    private void printMaxSelectedStatDebug(
+    private void printSelectedStatDebug(
+            String characterName,
             NexonCharacterSnapshot snapshot,
             PresetSelectionMode mode,
-            PresetStatBundle bundle,
-            PresetCombatPower selected
+            PresetCombatPower selected,
+            CombatStatBag selectedStats,
+            Long nexonCombatPower,
+            Long delta,
+            Double deltaRate
     ) {
-        if (mode != PresetSelectionMode.MAX) {
-            return;
-        }
-
-        CombatStatBag selectedStats = bundle.merged(selected.sourcePresetNos());
-
         System.out.println();
-        System.out.println("========== MAX Combat Power Stat Debug ==========");
+        System.out.println("========== Combat Power Stat Debug ==========");
+        System.out.println("characterName = " + characterName);
         System.out.println("date = " + snapshot.date());
+        System.out.println("mode = " + mode);
         System.out.println("selectedPresetNos = " + selected.sourcePresetNos());
         System.out.println("combatPower = " + selected.combatPower());
+        System.out.println("nexonCombatPower = " + nexonCombatPower);
+        System.out.println("delta = " + delta);
+        System.out.println("deltaRate = " + (deltaRate == null ? null : String.format("%.8f", deltaRate)));
+        System.out.println("weaponNormalization = " + selectedStats.weaponNormalization());
 
         CombatPowerCalculation calculation = selected.formula();
 
@@ -364,8 +627,41 @@ public class CombatPowerService {
         System.out.println("[MERGED STAT TOTALS]");
         printCombatStatBagDebug(selectedStats);
 
+        System.out.println();
+        System.out.println("[EFFECTIVE FORMULA STATS]");
+        printEffectiveFormulaStatsDebug(selectedStats, calculation, characterClass(snapshot), characterLevel(snapshot).orElse(null));
+
+        System.out.println();
+        System.out.println("[SOURCE TOTALS]");
+        printSourceTotalsDebug(selectedStats.contributions());
+
+        System.out.println();
+        System.out.println("[ITEM EXCEPTIONAL OPTIONS]");
+        printExceptionalOptionsDebug(snapshot, selected.sourcePresetNos().get("ITEM_EQUIPMENT"));
+
         System.out.println("=================================================");
         System.out.println();
+    }
+
+    private void printMaxSelectedStatDebug(
+            NexonCharacterSnapshot snapshot,
+            PresetSelectionMode mode,
+            PresetStatBundle bundle,
+            PresetCombatPower selected
+    ) {
+        if (mode != PresetSelectionMode.MAX) {
+            return;
+        }
+        printSelectedStatDebug(
+                "(trend)",
+                snapshot,
+                mode,
+                selected,
+                bundle.merged(selected.sourcePresetNos()),
+                null,
+                null,
+                null
+        );
     }
 
     private void printCombatStatBagDebug(CombatStatBag bag) {
@@ -386,5 +682,181 @@ public class CombatPowerService {
                     percent
             );
         }
+    }
+
+    private void printEffectiveFormulaStatsDebug(
+            CombatStatBag bag,
+            CombatPowerCalculation calculation,
+            String characterClass,
+            Integer characterLevel
+    ) {
+        CharacterStatProfile profile = CharacterStatProfile.from(characterClass);
+        printEffectiveStatBucket("main", profile.mainStats(), bag, characterLevel, true, calculation.mainStat());
+        printEffectiveStatBucket("sub", profile.subStats(), bag, characterLevel, false, calculation.subStat());
+
+        CombatStatKey attackKey = profile.usesMagicAttack() ? CombatStatKey.MAGIC_ATTACK : CombatStatKey.ATTACK_POWER;
+        long attackBase = bag.flat(attackKey);
+        double attackPercent = bag.percent(attackKey);
+        System.out.printf(
+                "attack(%s): base=%d, percent=%.2f%%, result=%d%n",
+                attackKey.name(),
+                attackBase,
+                attackPercent,
+                calculation.attackPower()
+        );
+        System.out.printf(
+                "damage: DAMAGE%%=%.2f%%, BOSS_DAMAGE%%=%.2f%%, resultFactor=%.5f%n",
+                bag.percent(CombatStatKey.DAMAGE),
+                bag.percent(CombatStatKey.BOSS_DAMAGE),
+                calculation.damageFactor()
+        );
+        System.out.printf(
+                "criticalDamage: CRITICAL_DAMAGE%%=%.2f%%, resultFactor=%.5f%n",
+                bag.percent(CombatStatKey.CRITICAL_DAMAGE),
+                calculation.criticalDamageFactor()
+        );
+        System.out.printf(
+                "finalDamage: FINAL_DAMAGE%%=%.2f%%, resultFactor=%.5f%n",
+                bag.percent(CombatStatKey.FINAL_DAMAGE),
+                calculation.finalDamageFactor()
+        );
+    }
+
+    private void printEffectiveStatBucket(
+            String label,
+            java.util.Set<CombatStatKey> keys,
+            CombatStatBag bag,
+            Integer characterLevel,
+            boolean main,
+            long result
+    ) {
+        long statFlat = keys.stream().mapToLong(bag::flat).sum();
+        long allFlat = bag.flat(CombatStatKey.ALL_STAT);
+        long ap = main ? estimatedApMainForDebug(keys, characterLevel) : estimatedApSubForDebug(keys, characterLevel);
+        long base = statFlat + allFlat + ap;
+        double statPercent = keys.stream().mapToDouble(bag::percent).sum();
+        double allPercent = bag.percent(CombatStatKey.ALL_STAT);
+        long statFinalFlat = keys.stream().mapToLong(bag::finalFlat).sum();
+        long allFinalFlat = bag.finalFlat(CombatStatKey.ALL_STAT);
+        System.out.printf(
+                "%s%s: flat=%d + allStat=%d + AP=%d => base=%d, percent=%.2f%% + allStat%%=%.2f%% => %.2f%%, finalFlat=%d + allFinalFlat=%d => %d, result=%d%n",
+                label,
+                keys,
+                statFlat,
+                allFlat,
+                ap,
+                base,
+                statPercent,
+                allPercent,
+                statPercent + allPercent,
+                statFinalFlat,
+                allFinalFlat,
+                statFinalFlat + allFinalFlat,
+                result
+        );
+    }
+
+    private long estimatedApMainForDebug(java.util.Set<CombatStatKey> keys, Integer characterLevel) {
+        if (characterLevel == null || characterLevel < 1 || keys.contains(CombatStatKey.MAX_HP) || keys.size() > 1) {
+            return 0L;
+        }
+        return 5L * characterLevel + 18L;
+    }
+
+    private long estimatedApSubForDebug(java.util.Set<CombatStatKey> keys, Integer characterLevel) {
+        if (characterLevel == null || characterLevel < 1 || keys.contains(CombatStatKey.MAX_HP)) {
+            return 0L;
+        }
+        return 4L;
+    }
+
+    private void printSourceTotalsDebug(List<StatContribution> contributions) {
+        Map<String, SourceTotals> totals = sourceTotals(contributions);
+        totals.forEach((source, sourceTotal) -> {
+            System.out.println();
+            System.out.println("- " + source);
+            printBucketDebug("flat(percent applied)", sourceTotal.percentAppliedFlat());
+            printBucketDebug("finalFlat(percent not applied)", sourceTotal.percentNotAppliedFlat());
+            printBucketDebug("percent", sourceTotal.percent());
+        });
+    }
+
+    private void printExceptionalOptionsDebug(NexonCharacterSnapshot snapshot, Integer itemPresetNo) {
+        JsonNode itemEquipment = snapshot.documents().get(NexonEndpoint.ITEM_EQUIPMENT);
+        if (itemEquipment == null || itemEquipment.isNull()) {
+            System.out.println("{}");
+            return;
+        }
+        String field = itemPresetNo == null ? "item_equipment" : "item_equipment_preset_" + itemPresetNo;
+        JsonNode items = itemEquipment.get(field);
+        if (items == null || !items.isArray()) {
+            System.out.println("{}");
+            return;
+        }
+        CombatStatBag exceptionalTotals = new CombatStatBag();
+        int nonZeroItems = 0;
+        for (JsonNode item : items) {
+            JsonNode exceptional = item.get("item_exceptional_option");
+            if (exceptional == null || exceptional.isNull()) {
+                continue;
+            }
+            long before = exceptionalTotalValue(exceptionalTotals);
+            addExceptionalIfPresent(exceptionalTotals, exceptional, "str", CombatStatKey.STR);
+            addExceptionalIfPresent(exceptionalTotals, exceptional, "dex", CombatStatKey.DEX);
+            addExceptionalIfPresent(exceptionalTotals, exceptional, "int", CombatStatKey.INT);
+            addExceptionalIfPresent(exceptionalTotals, exceptional, "luk", CombatStatKey.LUK);
+            addExceptionalIfPresent(exceptionalTotals, exceptional, "max_hp", CombatStatKey.MAX_HP);
+            addExceptionalIfPresent(exceptionalTotals, exceptional, "attack_power", CombatStatKey.ATTACK_POWER);
+            addExceptionalIfPresent(exceptionalTotals, exceptional, "magic_power", CombatStatKey.MAGIC_ATTACK);
+            if (exceptionalTotalValue(exceptionalTotals) != before) {
+                nonZeroItems++;
+                System.out.println("- " + item.path("item_name").asText("(unknown)") + " " + exceptional);
+            }
+        }
+        if (nonZeroItems == 0) {
+            System.out.println("{}");
+            return;
+        }
+        System.out.println("exceptionalItemCount = " + nonZeroItems);
+        printCombatStatBagDebug(exceptionalTotals);
+        System.out.println("note = exceptional options are added separately because raw item_total_option excludes them.");
+    }
+
+    private void addExceptionalIfPresent(CombatStatBag totals, JsonNode exceptional, String field, CombatStatKey key) {
+        if (!exceptional.hasNonNull(field)) {
+            return;
+        }
+        long value = parseLong(exceptional.get(field).asText()).orElse(0L);
+        if (value != 0L) {
+            totals.addFlat(key, value);
+        }
+    }
+
+    private long exceptionalTotalValue(CombatStatBag totals) {
+        long flat = 0L;
+        for (CombatStatKey key : CombatStatKey.values()) {
+            flat += Math.abs(totals.flat(key));
+        }
+        return flat;
+    }
+
+    private Optional<Long> parseLong(String value) {
+        if (value == null || value.isBlank()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(Long.parseLong(value.replace(",", "")));
+        } catch (NumberFormatException ignored) {
+            return Optional.empty();
+        }
+    }
+
+    private void printBucketDebug(String bucketName, Map<String, Double> values) {
+        if (values == null || values.isEmpty()) {
+            System.out.println("  " + bucketName + ": {}");
+            return;
+        }
+        System.out.println("  " + bucketName + ":");
+        values.forEach((stat, value) -> System.out.printf("    %-20s %.2f%n", stat, value));
     }
 }

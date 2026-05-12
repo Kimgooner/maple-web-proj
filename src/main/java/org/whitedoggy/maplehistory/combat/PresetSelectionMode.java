@@ -1,6 +1,7 @@
 package org.whitedoggy.maplehistory.combat;
 
 public enum PresetSelectionMode {
+    BATTLE,
     MAX,
     CURRENT,
     PRESET_1,

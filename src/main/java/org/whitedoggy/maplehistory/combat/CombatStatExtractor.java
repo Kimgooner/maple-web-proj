@@ -3,7 +3,10 @@ package org.whitedoggy.maplehistory.combat;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.springframework.stereotype.Component;
@@ -14,19 +17,22 @@ import tools.jackson.databind.JsonNode;
 public class CombatStatExtractor {
 
     private static final Pattern NUMBER = Pattern.compile("[-+]?\\d+(?:\\.\\d+)?");
+    private static final Pattern LEVEL_SCALING_OPTION = Pattern.compile("캐릭터 기준\\s*(\\d+)레벨 당\\s*(.+?)\\s*\\+?(-?\\d+(?:\\.\\d+)?)");
 
     public PresetStatBundle extract(
             Map<NexonEndpoint, JsonNode> documents,
             String characterClass) {
         PresetStatBundle bundle = new PresetStatBundle();
         CharacterStatProfile profile = CharacterStatProfile.from(characterClass);
+        Integer characterLevel = characterLevel(documents.get(NexonEndpoint.BASIC)).orElse(null);
+        Set<String> skill0Names = skill0Names(documents.get(NexonEndpoint.SKILL_0));
         documents.forEach((endpoint, document) -> {
             if (document == null || document.isNull() || endpoint == NexonEndpoint.STAT || endpoint == NexonEndpoint.BASIC) {
                 return;
             }
             switch (endpoint) {
-                case ITEM_EQUIPMENT -> extractItemEquipment(document, bundle);
-                case CASH_ITEM_EQUIPMENT -> extractCashItemEquipment(document, bundle);
+                case ITEM_EQUIPMENT -> extractItemEquipment(document, bundle, profile, characterLevel, skill0Names);
+                case CASH_ITEM_EQUIPMENT -> extractCashItemEquipment(document, bundle, characterLevel);
                 case SET_EFFECT -> extractSetEffect(document, bundle.common());
                 case SYMBOL_EQUIPMENT -> extractSymbol(document, bundle.common());
                 case ABILITY -> extractAbility(document, bundle);
@@ -36,78 +42,182 @@ public class CombatStatExtractor {
                 case UNION_CHAMPION -> extractUnionChampion(document, bundle.common());
                 case HEXA_MATRIX_STAT -> extractHexaStat(document, bundle, profile);
                 case SKILL_0 -> extractSkill0(document, bundle.common());
-                default -> extractGeneric(endpoint, document, bundle.common());
+                default -> extractGeneric(endpoint, document, bundle.common(), characterLevel);
             }
         });
+        addProjectileFallback(characterClass, bundle.common());
 
         return bundle;
     }
 
-    private void extractItemEquipment(JsonNode document, PresetStatBundle bundle) {
+    public PresetStatBundle extract(Map<NexonEndpoint, JsonNode> documents) {
+        return extract(documents, "");
+    }
+
+    private void extractItemEquipment(
+            JsonNode document,
+            PresetStatBundle bundle,
+            CharacterStatProfile profile,
+            Integer characterLevel,
+            Set<String> skill0Names
+    ) {
+        boolean hasPresetItems = false;
         for (String field : document.propertyNames()) {
             Optional<Integer> preset = presetNo(field);
             if (preset.isPresent()) {
-                addItemArray(document.get(field), bundle.sourcePreset("ITEM_EQUIPMENT", preset.get()));
+                hasPresetItems = true;
+                addItemArray(document.get(field), bundle.sourcePreset("ITEM_EQUIPMENT", preset.get()), profile, characterLevel, skill0Names);
             }
         }
-        if (document.has("title") && document.get("title").hasNonNull("title_description")) {
+        if (document.has("title") && document.get("title").hasNonNull("title_description")
+                && !isExpiredTitle(document.get("title"))) {
             parseOptionText(
                     NexonEndpoint.ITEM_EQUIPMENT,
                     document.get("title").path("title_name").asText("title"),
                     document.get("title").get("title_description").asText(),
                     bundle.common(),
-                    false
+                    false,
+                    characterLevel
             );
         }
-        if (bundle.presets().isEmpty() && document.has("item_equipment")) {
-            addItemArray(document.get("item_equipment"), bundle.common());
+        if (!hasPresetItems && document.has("item_equipment")) {
+            addItemArray(document.get("item_equipment"), bundle.common(), profile, characterLevel, skill0Names);
+        }
+        if (document.has("dragon_equipment")) {
+            addItemArray(document.get("dragon_equipment"), bundle.common(), profile, characterLevel, skill0Names);
         }
     }
 
-    private void addItemArray(JsonNode items, CombatStatBag bag) {
+    private boolean isExpiredTitle(JsonNode title) {
+        if (title == null || title.isNull()) {
+            return false;
+        }
+        String expired = title.path("date_option_expire").asText("");
+        return expired.contains("expired");
+    }
+
+    private boolean isWeaponItem(JsonNode item) {
+        if (item == null || item.isNull()) {
+            return false;
+        }
+
+        String slot = item.path("item_equipment_slot").asText("");
+
+        return "무기".equals(slot)
+                || "weapon".equalsIgnoreCase(slot);
+    }
+
+    private void addItemArray(JsonNode items, CombatStatBag bag, CharacterStatProfile profile, Integer characterLevel, Set<String> skill0Names) {
         if (items == null || !items.isArray()) {
             return;
         }
         for (JsonNode item : items) {
+            boolean weapon = isWeaponItem(item);
+
+            if (item.hasNonNull("item_total_option")) {
+                JsonNode totalOption = item.get("item_total_option");
+
+                if (!weapon) {
+                    addStructuredOptions(
+                            NexonEndpoint.ITEM_EQUIPMENT,
+                            totalOption,
+                            bag,
+                            false);
+                }
+            }
+
+            if(weapon){
+                addStructuredOptionsForWeapon(NexonEndpoint.ITEM_EQUIPMENT, item.get("item_total_option"), bag, false);
+                applyWeaponNormalization(item, bag, profile);
+            }
+
+            if (item.hasNonNull("item_exceptional_option")) {
+                addExceptionalOptions(NexonEndpoint.ITEM_EQUIPMENT, item.get("item_exceptional_option"), bag);
+            }
+
+            /*
             if (item.hasNonNull("item_total_option")) {
                 addStructuredOptions(NexonEndpoint.ITEM_EQUIPMENT, item.get("item_total_option"), bag, false);
             }
-            applyWeaponNormalization(item, bag);
+            */
+
+            applyTranscendentWeaponFinalDamage(item, bag, skill0Names);
             for (String field : item.propertyNames()) {
                 if (field.contains("potential_option") || field.contains("soul_option") || field.contains("title")) {
                     JsonNode value = item.get(field);
                     if (value != null && value.isTextual()) {
-                        parseOptionText(NexonEndpoint.ITEM_EQUIPMENT, field, value.asText(), bag, false);
+                        parseOptionText(NexonEndpoint.ITEM_EQUIPMENT, field, value.asText(), bag, false, characterLevel);
                     }
                 }
             }
         }
     }
 
-    private void applyWeaponNormalization(JsonNode item, CombatStatBag bag) {
-        if (!"무기".equals(item.path("item_equipment_slot").asText())) {
+    private void addStructuredOptionsForWeapon(NexonEndpoint endpoint, JsonNode options, CombatStatBag bag, boolean finalFlat) {
+        addFlatIfPresent(endpoint, options, "str", CombatStatKey.STR, bag, finalFlat);
+        addFlatIfPresent(endpoint, options, "dex", CombatStatKey.DEX, bag, finalFlat);
+        addFlatIfPresent(endpoint, options, "int", CombatStatKey.INT, bag, finalFlat);
+        addFlatIfPresent(endpoint, options, "luk", CombatStatKey.LUK, bag, finalFlat);
+        addFlatIfPresent(endpoint, options, "max_hp", CombatStatKey.MAX_HP, bag, finalFlat);
+        addPercentIfPresent(endpoint, options, "all_stat", CombatStatKey.ALL_STAT, bag);
+        addPercentIfPresent(endpoint, options, "damage", CombatStatKey.DAMAGE, bag);
+        addPercentIfPresent(endpoint, options, "boss_damage", CombatStatKey.BOSS_DAMAGE, bag);
+    }
+
+    private void addExceptionalOptions(NexonEndpoint endpoint, JsonNode options, CombatStatBag bag) {
+        addFlatIfPresent(endpoint, options, "str", CombatStatKey.STR, bag, false);
+        addFlatIfPresent(endpoint, options, "dex", CombatStatKey.DEX, bag, false);
+        addFlatIfPresent(endpoint, options, "int", CombatStatKey.INT, bag, false);
+        addFlatIfPresent(endpoint, options, "luk", CombatStatKey.LUK, bag, false);
+        addFlatIfPresent(endpoint, options, "max_hp", CombatStatKey.MAX_HP, bag, false);
+        addFlatIfPresent(endpoint, options, "attack_power", CombatStatKey.ATTACK_POWER, bag, false);
+        addFlatIfPresent(endpoint, options, "magic_power", CombatStatKey.MAGIC_ATTACK, bag, false);
+    }
+
+    private void applyWeaponNormalization(JsonNode item, CombatStatBag bag, CharacterStatProfile profile) {
+        String weaponName = item.path("item_name").asText();
+        CombatStatKey targetStat = profile.usesMagicAttack() ? CombatStatKey.MAGIC_ATTACK : CombatStatKey.ATTACK_POWER;
+        String sourceField = profile.usesMagicAttack() ? "magic_power" : "attack_power";
+        long originalAttack = parseNumber(item.path("item_total_option").path(sourceField).asText()).map(Math::round).orElse(0L);
+        long bonusAttack = parseNumber(item.path("item_add_option").path(sourceField).asText()).map(Math::round).orElse(0L);
+        long starforceAttack = parseNumber(item.path("item_starforce_option").path(sourceField).asText()).map(Math::round).orElse(0L);
+        int starforce = parseNumber(item.path("starforce").asText()).map(Double::intValue).orElse(0);
+        int scroll = parseNumber(item.path("scroll_upgrade").asText()).map(Double::intValue).orElse(0);
+        Optional<WeaponNormalization> normalizedAttack = WeaponTransformTable.normalizeWeapon(
+                weaponName,
+                originalAttack,
+                bonusAttack,
+                starforceAttack,
+                starforce,
+                scroll,
+                targetStat
+        );
+        if (normalizedAttack.isPresent()) {
+            bag.applyWeaponNormalizationAbsolute(normalizedAttack.get(), targetStat);
             return;
         }
-        String weaponName = item.path("item_name").asText();
-        String equipmentPart = item.path("item_equipment_part").asText();
-        long originalAttack = parseNumber(item.path("item_total_option").path("attack_power").asText())
-                .map(Math::round)
-                .orElse(0L);
-        long bonusAttack = parseNumber(item.path("item_add_option").path("attack_power").asText())
-                .map(Math::round)
-                .orElse(0L);
-        Optional<Long> normalizedAttack = WeaponNormalizationTable.normalizedBowTotal(weaponName, equipmentPart, bonusAttack);
-        if (originalAttack > 0 && normalizedAttack.isPresent()) {
-            long normalized = normalizedAttack.get();
-            bag.applyWeaponNormalization(new WeaponNormalization(weaponName, originalAttack, normalized, normalized - originalAttack));
+        if (originalAttack > 0L) {
+            bag.applyWeaponNormalizationAbsolute(
+                    new WeaponNormalization(
+                            weaponName,
+                            targetStat.name(),
+                            originalAttack,
+                            originalAttack,
+                            0L,
+                            null,
+                            "ORIGINAL",
+                            null
+                    ),
+                    targetStat
+            );
         }
     }
 
-    private void extractCashItemEquipment(JsonNode document, PresetStatBundle bundle) {
-        addCashItemArray(document.get("cash_item_equipment_base"), bundle.common());
+    private void extractCashItemEquipment(JsonNode document, PresetStatBundle bundle, Integer characterLevel) {
+        addCashItemArray(document.get("cash_item_equipment_base"), bundle.common(), characterLevel);
     }
 
-    private void addCashItemArray(JsonNode items, CombatStatBag bag) {
+    private void addCashItemArray(JsonNode items, CombatStatBag bag, Integer characterLevel) {
         if (items == null || !items.isArray()) {
             return;
         }
@@ -118,7 +228,7 @@ public class CombatStatExtractor {
             }
             for (JsonNode option : options) {
                 if (option.hasNonNull("option_type") && option.hasNonNull("option_value")) {
-                    parseOptionText(NexonEndpoint.CASH_ITEM_EQUIPMENT, "cash_item_option", option.get("option_type").asText() + " " + option.get("option_value").asText(), bag, false);
+                    parseOptionText(NexonEndpoint.CASH_ITEM_EQUIPMENT, "cash_item_option", option.get("option_type").asText() + " " + option.get("option_value").asText(), bag, false, characterLevel);
                 }
             }
         }
@@ -224,12 +334,12 @@ public class CombatStatExtractor {
             }
             hasPreset = true;
             CombatStatBag presetBag = bundle.sourcePreset("UNION_RAIDER", presetNo);
-            addStringArray(NexonEndpoint.UNION_RAIDER, preset.get("union_raider_stat"), "union_raider_preset_" + presetNo + "_stat", presetBag, true);
-            addStringArray(NexonEndpoint.UNION_RAIDER, preset.get("union_occupied_stat"), "union_raider_preset_" + presetNo + "_occupied", presetBag, false);
+            addUnionStatArray(preset.get("union_raider_stat"), "union_raider_preset_" + presetNo + "_stat", presetBag, true);
+            addUnionStatArray(preset.get("union_occupied_stat"), "union_raider_preset_" + presetNo + "_occupied", presetBag, false);
         }
         if (!hasPreset) {
-            addStringArray(NexonEndpoint.UNION_RAIDER, document.get("union_raider_stat"), "union_raider_stat", bundle.common(), true);
-            addStringArray(NexonEndpoint.UNION_RAIDER, document.get("union_occupied_stat"), "union_occupied_stat", bundle.common(), false);
+            addUnionStatArray(document.get("union_raider_stat"), "union_raider_stat", bundle.common(), true);
+            addUnionStatArray(document.get("union_occupied_stat"), "union_occupied_stat", bundle.common(), false);
         }
     }
 
@@ -256,10 +366,47 @@ public class CombatStatExtractor {
         }
     }
 
+    private void addUnionStatArray(JsonNode values, String label, CombatStatBag bag, boolean raiderMemberEffect) {
+        if (values == null || !values.isArray()) {
+            return;
+        }
+        for (JsonNode value : values) {
+            if (value.isTextual()) {
+                parseUnionOption(label, value.asText(), bag, raiderMemberEffect);
+            }
+        }
+    }
+
+    private void parseUnionOption(String label, String option, CombatStatBag bag, boolean raiderMemberEffect) {
+        if (option == null || option.isBlank() || ignoredUnionOption(option)) {
+            return;
+        }
+        addOption(NexonEndpoint.UNION_RAIDER, label, option, bag, raiderMemberEffect, null);
+    }
+
+    private boolean ignoredUnionOption(String option) {
+        return option.contains("크리티컬 확률")
+                || option.contains("몬스터 방어율 무시")
+                || option.contains("방어율 무시")
+                || option.contains("상태 이상")
+                || option.contains("일반 몬스터")
+                || option.contains("확률")
+                || option.contains("파이널 어택")
+                || option.contains("스킬 재사용")
+                || option.contains("재사용 대기시간")
+                || option.contains("소환수 지속시간")
+                || option.contains("버프 지속")
+                || option.contains("메소 획득")
+                || option.contains("경험치")
+                || option.contains("획득 경험치")
+                || option.contains("이동속도")
+                || option.contains("최대 MP");
+    }
+
     private void extractHexaStat(JsonNode document, PresetStatBundle bundle, CharacterStatProfile profile) {
-        addHexaCores(document.get("preset_hexa_stat_core"), bundle.common(), 1, profile);
-        addHexaCores(document.get("preset_hexa_stat_core_2"), bundle.common(), 2, profile);
-        addHexaCores(document.get("preset_hexa_stat_core_3"), bundle.common(), 3, profile);
+        addHexaCores(document.get("character_hexa_stat_core"), bundle.common(), 1, profile);
+        addHexaCores(document.get("character_hexa_stat_core_2"), bundle.common(), 2, profile);
+        addHexaCores(document.get("character_hexa_stat_core_3"), bundle.common(), 3, profile);
     }
 
     private void addHexaCores(JsonNode cores, CombatStatBag bag, int coreNo, CharacterStatProfile profile) {
@@ -282,6 +429,8 @@ public class CombatStatExtractor {
         String label = "hexa_core_" + coreNo + (main ? "_main" : "_sub");
         if (name.contains("주력 스탯")) {
             bag.addFinalFlat(mainStat, Math.round(value), NexonEndpoint.HEXA_MATRIX_STAT.name(), label, name + " Lv." + level);
+        } else if (name.contains("마력")) {
+            bag.addFlat(CombatStatKey.MAGIC_ATTACK, Math.round(value), NexonEndpoint.HEXA_MATRIX_STAT.name(), label, name + " Lv." + level);
         } else if (name.contains("공격력")) {
             bag.addFlat(CombatStatKey.ATTACK_POWER, Math.round(value), NexonEndpoint.HEXA_MATRIX_STAT.name(), label, name + " Lv." + level);
             bag.addFlat(CombatStatKey.MAGIC_ATTACK, Math.round(value), NexonEndpoint.HEXA_MATRIX_STAT.name(), label, name + " Lv." + level);
@@ -309,7 +458,7 @@ public class CombatStatExtractor {
         if (name.contains("주력 스탯")) {
             return main ? mainStat[capped] : subStat[capped];
         }
-        if (name.contains("공격력")) {
+        if (name.contains("공격력") || name.contains("마력")) {
             return main ? mainAttack[capped] : subAttack[capped];
         }
         if (name.contains("보스")) {
@@ -323,7 +472,6 @@ public class CombatStatExtractor {
         }
         return 0;
     }
-
     private void extractSkill0(JsonNode document, CombatStatBag bag) {
         JsonNode skills = document.get("character_skill");
         if (skills == null || !skills.isArray()) {
@@ -340,7 +488,13 @@ public class CombatStatExtractor {
                     blessingAttack = attack;
                     blessingSource = name;
                 }
-            } else if (isCombatPowerEligibleBeginnerSkill(name, effect)) {
+            } else if (isTranscendentWeaponSkill(name)) {
+                // The +10% final damage is tied to the equipped weapon family, so it is attached
+                // from item equipment presets rather than treated as a common 0th job skill.
+                continue;
+            } else if (isPetSetSkill(name, effect)) {
+                parseOptionText(NexonEndpoint.SKILL_0, name, effect, bag, false);
+            } else if (name.equals("메이플 스위츠")) {
                 parseOptionText(NexonEndpoint.SKILL_0, name, effect, bag, false);
             }
         }
@@ -354,36 +508,120 @@ public class CombatStatExtractor {
         if (name == null || effect == null || effect.isBlank()) {
             return false;
         }
-        if ("파괴의 얄다바오트".equals(name)
-                || "초월 : 불굴의 결의".equals(name)
-                || "초월 : 결전의 의지".equals(name)
-                || "메이플 스위츠".equals(name)
-        ) {
-            return true;
+        if (effect.contains("영구적으로")) {
+            return false;
         }
-        if (name.contains("Lv")) return true;
-        return false;
+        boolean hasCombatPowerStat = effect.contains("공격력")
+                || effect.contains("마력")
+                || effect.contains("올스탯")
+                || effect.contains("보스 몬스터")
+                || effect.contains("크리티컬 데미지");
+        boolean eventBuffShape = effect.contains("몬스터파크")
+                || effect.contains("그란디스 일일퀘스트")
+                || effect.contains("획득 심볼")
+                || (effect.contains("공격력/마력")
+                && effect.contains("보스 몬스터")
+                && effect.contains("올스탯"));
+        return hasCombatPowerStat && eventBuffShape;
     }
 
-    private void extractGeneric(NexonEndpoint endpoint, JsonNode document, CombatStatBag bag) {
+    private boolean isPetSetSkill(String name, String effect) {
+        return name != null
+                && effect != null
+                && name.contains("Lv.")
+                && (effect.contains("공격력") || effect.contains("마력"));
+    }
+
+    private boolean isTranscendentWeaponSkill(String name) {
+        return "파괴의 얄다바오트".equals(name)
+                || "초월 : 결전의 의지".equals(name);
+    }
+
+    private void applyTranscendentWeaponFinalDamage(JsonNode item, CombatStatBag bag, Set<String> skill0Names) {
+        if (!"무기".equals(item.path("item_equipment_slot").asText())) {
+            return;
+        }
+        String weaponName = item.path("item_name").asText();
+        Optional<String> skillName = Optional.empty();
+        if (weaponName.contains("데스티니")) {
+            skillName = skill0Names.stream()
+                    .filter(name -> name.startsWith("초월 :"))
+                    .findFirst();
+        } else if (weaponName.contains("제네시스")) {
+            skillName = skill0Names.contains("파괴의 얄다바오트")
+                    ? Optional.of("파괴의 얄다바오트")
+                    : Optional.empty();
+        }
+        skillName.ifPresent(name -> bag.addPercent(
+                CombatStatKey.FINAL_DAMAGE,
+                10.0d,
+                NexonEndpoint.ITEM_EQUIPMENT.name(),
+                name,
+                weaponName + " final damage +10%"
+        ));
+    }
+
+    private Set<String> skill0Names(JsonNode skill0) {
+        JsonNode skills = skill0 == null || skill0.isNull() ? null : skill0.get("character_skill");
+        if (skills == null || !skills.isArray()) {
+            return Set.of();
+        }
+        return StreamSupport.stream(skills.spliterator(), false)
+                .map(skill -> skill.path("skill_name").asText())
+                .collect(Collectors.toUnmodifiableSet());
+    }
+
+    private void extractGeneric(NexonEndpoint endpoint, JsonNode document, CombatStatBag bag, Integer characterLevel) {
         if (document.isObject()) {
             if (document.hasNonNull("name") && document.hasNonNull("stat_value")) {
-                parseOptionText(endpoint, document.get("name").asText(), document.get("name").asText() + " " + document.get("stat_value").asText(), bag, isFinalFlatEndpoint(endpoint));
+                parseOptionText(endpoint, document.get("name").asText(), document.get("name").asText() + " " + document.get("stat_value").asText(), bag, isFinalFlatEndpoint(endpoint), characterLevel);
             }
             if (document.hasNonNull("name")) {
-                parseOptionText(endpoint, "name", document.get("name").asText(), bag, isFinalFlatEndpoint(endpoint));
+                parseOptionText(endpoint, "name", document.get("name").asText(), bag, isFinalFlatEndpoint(endpoint), characterLevel);
             }
             if (document.hasNonNull("stat_value") && document.hasNonNull("stat_name")) {
-                parseOptionText(endpoint, document.get("stat_name").asText(), document.get("stat_value").asText(), bag, isFinalFlatEndpoint(endpoint));
+                parseOptionText(endpoint, document.get("stat_name").asText(), document.get("stat_value").asText(), bag, isFinalFlatEndpoint(endpoint), characterLevel);
             }
             for (JsonNode child : document.values()) {
-                extractGeneric(endpoint, child, bag);
+                extractGeneric(endpoint, child, bag, characterLevel);
             }
         } else if (document.isArray()) {
             for (JsonNode child : document) {
-                extractGeneric(endpoint, child, bag);
+                extractGeneric(endpoint, child, bag, characterLevel);
             }
         }
+    }
+
+    private void addProjectileFallback(String characterClass, CombatStatBag bag) {
+        String name = characterClass == null ? "" : characterClass.toLowerCase(Locale.ROOT);
+        if (containsAny(name, "보우마스터", "윈드브레이커", "메르세데스", "패스파인더")) {
+            addProjectileAttack(bag, "활 전용 티타늄 화살", 9);
+        } else if (containsAny(name, "신궁", "와일드헌터")) {
+            addProjectileAttack(bag, "석궁 전용 티타늄 화살", 9);
+        } else if (containsAny(name, "나이트로드", "나이트워커")) {
+            addProjectileAttack(bag, "플레임 표창", 29);
+        } else if (containsAny(name, "캡틴", "메카닉")) {
+            addProjectileAttack(bag, "자이언트 불릿", 22);
+        }
+    }
+
+    private void addProjectileAttack(CombatStatBag bag, String itemName, long attack) {
+        bag.addFlat(
+                CombatStatKey.ATTACK_POWER,
+                attack,
+                "PROJECTILE_FALLBACK",
+                itemName,
+                "OpenAPI does not expose equipped projectile; assuming KMS strongest +" + attack
+        );
+    }
+
+    private boolean containsAny(String source, String... needles) {
+        for (String needle : needles) {
+            if (source.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void addStructuredOptions(NexonEndpoint endpoint, JsonNode options, CombatStatBag bag, boolean finalFlat) {
@@ -400,11 +638,15 @@ public class CombatStatExtractor {
     }
 
     private void parseOptionText(NexonEndpoint endpoint, String label, String text, CombatStatBag bag, boolean finalFlat) {
+        parseOptionText(endpoint, label, text, bag, finalFlat, null);
+    }
+
+    private void parseOptionText(NexonEndpoint endpoint, String label, String text, CombatStatBag bag, boolean finalFlat, Integer characterLevel) {
         if (text == null || text.isBlank()) {
             return;
         }
-        if (text.contains("STR, DEX, LUK")) {
-            addOption(endpoint, label, text.trim(), bag, finalFlat);
+        if (containsGroupedBasicStatsWithSingleValue(text)) {
+            addOption(endpoint, label, text.trim(), bag, finalFlat, characterLevel);
             return;
         }
         for (String part : text.split("[,\\n\\r]+")) {
@@ -412,12 +654,12 @@ public class CombatStatExtractor {
             if (option.isBlank() || ignoredOption(option)) {
                 continue;
             }
-            addOption(endpoint, label, option, bag, finalFlat);
+            addOption(endpoint, label, option, bag, finalFlat, characterLevel);
         }
     }
 
-    private void addOption(NexonEndpoint endpoint, String label, String option, CombatStatBag bag, boolean finalFlat) {
-        Optional<Double> number = parseNumber(option);
+    private void addOption(NexonEndpoint endpoint, String label, String option, CombatStatBag bag, boolean finalFlat, Integer characterLevel) {
+        Optional<Double> number = optionValue(option, characterLevel);
         if (number.isEmpty()) {
             return;
         }
@@ -434,27 +676,87 @@ public class CombatStatExtractor {
         } else if (option.contains("공격력") && option.contains("마력")) {
             addNumber(endpoint, label, option, CombatStatKey.ATTACK_POWER, value, percent, finalFlat, bag);
             addNumber(endpoint, label, option, CombatStatKey.MAGIC_ATTACK, value, percent, finalFlat, bag);
-        } else if (option.contains("STR") && option.contains("DEX") && option.contains("LUK")) {
-            addNumber(endpoint, label, option, CombatStatKey.STR, value, percent, finalFlat, bag);
-            addNumber(endpoint, label, option, CombatStatKey.DEX, value, percent, finalFlat, bag);
-            addNumber(endpoint, label, option, CombatStatKey.LUK, value, percent, finalFlat, bag);
         } else if (option.contains("공격력")) {
             addNumber(endpoint, label, option, CombatStatKey.ATTACK_POWER, value, percent, finalFlat, bag);
         } else if (option.contains("마력")) {
             addNumber(endpoint, label, option, CombatStatKey.MAGIC_ATTACK, value, percent, finalFlat, bag);
         } else if (option.contains("올스탯")) {
             addNumber(endpoint, label, option, CombatStatKey.ALL_STAT, value, percent, finalFlat, bag);
-        } else if (option.contains("STR") || option.contains("힘")) {
-            addNumber(endpoint, label, option, CombatStatKey.STR, value, percent, finalFlat, bag);
-        } else if (option.contains("DEX") || option.contains("민첩")) {
-            addNumber(endpoint, label, option, CombatStatKey.DEX, value, percent, finalFlat, bag);
-        } else if (option.contains("INT") || option.contains("지력") || option.contains("지능")) {
-            addNumber(endpoint, label, option, CombatStatKey.INT, value, percent, finalFlat, bag);
-        } else if (option.contains("LUK") || option.contains("행운")) {
-            addNumber(endpoint, label, option, CombatStatKey.LUK, value, percent, finalFlat, bag);
         } else if (option.contains("최대 HP") || option.contains("MaxHP") || option.contains("MAX HP")) {
             addNumber(endpoint, label, option, CombatStatKey.MAX_HP, value, percent, finalFlat, bag);
+        } else {
+            boolean added = false;
+            if (containsStatToken(option, "STR", "힘")) {
+                addNumber(endpoint, label, option, CombatStatKey.STR, value, percent, finalFlat, bag);
+                added = true;
+            }
+            if (containsStatToken(option, "DEX", "민첩")) {
+                addNumber(endpoint, label, option, CombatStatKey.DEX, value, percent, finalFlat, bag);
+                added = true;
+            }
+            if (containsStatToken(option, "INT", "지력", "지능")) {
+                addNumber(endpoint, label, option, CombatStatKey.INT, value, percent, finalFlat, bag);
+                added = true;
+            }
+            if (containsStatToken(option, "LUK", "행운")) {
+                addNumber(endpoint, label, option, CombatStatKey.LUK, value, percent, finalFlat, bag);
+                added = true;
+            }
+            if (!added && option.contains("HP")) {
+                addNumber(endpoint, label, option, CombatStatKey.MAX_HP, value, percent, finalFlat, bag);
+            }
         }
+    }
+
+    private boolean containsGroupedBasicStatsWithSingleValue(String text) {
+        int count = 0;
+        if (containsStatToken(text, "STR", "힘")) {
+            count++;
+        }
+        if (containsStatToken(text, "DEX", "민첩")) {
+            count++;
+        }
+        if (containsStatToken(text, "INT", "지력", "지능")) {
+            count++;
+        }
+        if (containsStatToken(text, "LUK", "행운")) {
+            count++;
+        }
+        return count >= 2 && numberCount(text) == 1;
+    }
+
+    private int numberCount(String text) {
+        Matcher matcher = NUMBER.matcher(text == null ? "" : text.replace(",", ""));
+        int count = 0;
+        while (matcher.find()) {
+            count++;
+        }
+        return count;
+    }
+
+    private boolean containsStatToken(String text, String... tokens) {
+        for (String token : tokens) {
+            if (text.contains(token)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Optional<Double> optionValue(String option, Integer characterLevel) {
+        Matcher levelScaling = LEVEL_SCALING_OPTION.matcher(option);
+        if (levelScaling.find()) {
+            if (characterLevel == null || characterLevel < 1) {
+                return Optional.empty();
+            }
+            int levelStep = Integer.parseInt(levelScaling.group(1));
+            double valuePerStep = Double.parseDouble(levelScaling.group(3));
+            if (levelStep <= 0) {
+                return Optional.empty();
+            }
+            return Optional.of(Math.floor(characterLevel / (double) levelStep) * valuePerStep);
+        }
+        return parseNumber(option);
     }
 
     private boolean ignoredOption(String option) {
@@ -462,6 +764,8 @@ public class CombatStatExtractor {
                 || option.contains("방어율 무시")
                 || option.contains("상태 이상")
                 || option.contains("일반 몬스터")
+                || option.contains("파이널 어택류")
+                || option.contains("파이널 어택")
                 || option.contains("확률")
                 || option.contains("아이템 드롭")
                 || option.contains("드롭률")
@@ -538,9 +842,17 @@ public class CombatStatExtractor {
         return parseNumber(value).map(Double::intValue);
     }
 
+    private Optional<Integer> characterLevel(JsonNode basic) {
+        if (basic == null || basic.isNull() || !basic.hasNonNull("character_level")) {
+            return Optional.empty();
+        }
+        return parseNumber(basic.get("character_level").asText()).map(Double::intValue);
+    }
+
     private boolean isFinalFlatEndpoint(NexonEndpoint endpoint) {
         return endpoint == NexonEndpoint.SYMBOL_EQUIPMENT
                 || endpoint == NexonEndpoint.HYPER_STAT
                 || endpoint == NexonEndpoint.HEXA_MATRIX_STAT;
     }
 }
+

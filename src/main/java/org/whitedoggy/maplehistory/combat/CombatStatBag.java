@@ -85,16 +85,34 @@ public final class CombatStatBag {
     }
 
     public void applyWeaponNormalization(WeaponNormalization normalization) {
+        applyWeaponNormalization(normalization, CombatStatKey.ATTACK_POWER);
+    }
+
+    public void applyWeaponNormalization(WeaponNormalization normalization, CombatStatKey statKey) {
         if (normalization == null || normalization.delta() == 0) {
             return;
         }
         weaponNormalization = normalization;
         addFlat(
-                CombatStatKey.ATTACK_POWER,
+                statKey,
                 normalization.delta(),
                 "WEAPON_NORMALIZATION",
                 normalization.weaponName(),
-                normalization.originalAttack() + " -> " + normalization.normalizedBowAttack()
+                normalization.originalAttack() + " -> " + normalization.normalizedAttack()
+        );
+    }
+
+    public void applyWeaponNormalizationAbsolute(WeaponNormalization normalization, CombatStatKey statKey) {
+        if (normalization == null || normalization.normalizedAttack() == 0) {
+            return;
+        }
+        weaponNormalization = normalization;
+        addFlat(
+                statKey,
+                normalization.normalizedAttack(),
+                "WEAPON_NORMALIZATION",
+                normalization.weaponName(),
+                normalization.originalAttack() + " -> " + normalization.normalizedAttack()
         );
     }
 

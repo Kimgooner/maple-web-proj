@@ -28,7 +28,7 @@ public class CombatPowerController {
             @PathVariable String characterName,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
-            @RequestParam(defaultValue = "MAX") PresetSelectionMode mode
+            @RequestParam(defaultValue = "BATTLE") PresetSelectionMode mode
     ) {
         return combatPowerService.trend(characterName, from, to, mode);
     }

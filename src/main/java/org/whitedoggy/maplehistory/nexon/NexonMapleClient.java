@@ -36,7 +36,6 @@ public class NexonMapleClient {
                         get(NexonEndpoint.CASH_ITEM_EQUIPMENT, ocid, date).onErrorResume(throwable -> Mono.empty()).defaultIfEmpty(nullNode()),
                         get(NexonEndpoint.SET_EFFECT, ocid, date).onErrorResume(throwable -> Mono.empty()).defaultIfEmpty(nullNode()),
                         get(NexonEndpoint.SYMBOL_EQUIPMENT, ocid, date).onErrorResume(throwable -> Mono.empty()).defaultIfEmpty(nullNode()),
-                        get(NexonEndpoint.ANDROID_EQUIPMENT, ocid, date).onErrorResume(throwable -> Mono.empty()).defaultIfEmpty(nullNode()),
                         get(NexonEndpoint.PET_EQUIPMENT, ocid, date).onErrorResume(throwable -> Mono.empty()).defaultIfEmpty(nullNode())
                 )
                 .zipWith(Mono.zip(
@@ -57,8 +56,7 @@ public class NexonMapleClient {
                     documents.put(NexonEndpoint.CASH_ITEM_EQUIPMENT, tuple.getT1().getT4());
                     documents.put(NexonEndpoint.SET_EFFECT, tuple.getT1().getT5());
                     documents.put(NexonEndpoint.SYMBOL_EQUIPMENT, tuple.getT1().getT6());
-                    documents.put(NexonEndpoint.ANDROID_EQUIPMENT, tuple.getT1().getT7());
-                    documents.put(NexonEndpoint.PET_EQUIPMENT, tuple.getT1().getT8());
+                    documents.put(NexonEndpoint.PET_EQUIPMENT, tuple.getT1().getT7());
                     documents.put(NexonEndpoint.HYPER_STAT, tuple.getT2().getT1());
                     documents.put(NexonEndpoint.ABILITY, tuple.getT2().getT2());
                     documents.put(NexonEndpoint.SKILL_0, tuple.getT2().getT3());
