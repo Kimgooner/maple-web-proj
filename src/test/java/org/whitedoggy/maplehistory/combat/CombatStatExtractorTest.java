@@ -48,6 +48,117 @@ class CombatStatExtractorTest {
     }
 
     @Test
+    void reconstructsHandledSetEffectsPerItemPreset() throws Exception {
+        var itemEquipment = objectMapper.readTree("""
+                {
+                  "preset_no": 2,
+                  "item_equipment_preset_1": [
+                    {"item_name": "크리스탈 웬투스 뱃지"},
+                    {"item_name": "골든 클로버 벨트"},
+                    {"item_name": "핑크빛 성배"},
+                    {"item_name": "파풀라투스 마크"}
+                  ],
+                  "item_equipment_preset_2": [
+                    {"item_name": "크리스탈 웬투스 뱃지"},
+                    {"item_name": "골든 클로버 벨트"},
+                    {"item_name": "핑크빛 성배"},
+                    {"item_name": "파풀라투스 마크"},
+                    {"item_name": "도미네이터 펜던트"},
+                    {"item_name": "데이브레이크 펜던트"},
+                    {"item_name": "에스텔라 이어링"},
+                    {"item_name": "트와일라이트 마크"},
+                    {"item_name": "여명의 가디언 엔젤 링"}
+                  ]
+                }
+                """);
+        var setEffect = objectMapper.readTree("""
+                {
+                  "set_effect": [
+                    {
+                      "set_name": "보스 장신구 세트",
+                      "total_set_count": 5,
+                      "set_effect_info": [
+                        {
+                          "set_count": 3,
+                          "set_option": "올스탯  +10, 최대 HP  +5%, 최대 MP  +5%, 공격력  +5, 마력  +5"
+                        },
+                        {
+                          "set_count": 5,
+                          "set_option": "올스탯  +10, 최대 HP  +5%, 최대 MP  +5%, 공격력  +5, 마력  +5"
+                        }
+                      ]
+                    },
+                    {
+                      "set_name": "여명의 보스 세트",
+                      "total_set_count": 4,
+                      "set_effect_info": [
+                        {
+                          "set_count": 2,
+                          "set_option": "올스탯  +10, 최대 HP  +250, 공격력  +10, 마력  +10, 보스 몬스터 데미지 +10%"
+                        },
+                        {
+                          "set_count": 3,
+                          "set_option": "올스탯  +10, 최대 HP  +250, 공격력  +10, 마력  +10"
+                        },
+                        {
+                          "set_count": 4,
+                          "set_option": "올스탯  +10, 최대 HP  +250, 공격력  +10, 마력  +10, 방어력  +100, 몬스터 방어율 무시 +10%"
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """);
+
+        PresetStatBundle bundle = extractor.extract(Map.of(
+                NexonEndpoint.ITEM_EQUIPMENT, itemEquipment,
+                NexonEndpoint.SET_EFFECT, setEffect
+        ), "히어로");
+
+        CombatStatBag preset1 = bundle.merged(Map.of("ITEM_EQUIPMENT", 1));
+        CombatStatBag preset2 = bundle.merged(Map.of("ITEM_EQUIPMENT", 2));
+
+        assertThat(preset1.percent(CombatStatKey.BOSS_DAMAGE)).isEqualTo(0);
+        assertThat(preset1.percent(CombatStatKey.ALL_STAT)).isEqualTo(10);
+        assertThat(preset2.percent(CombatStatKey.BOSS_DAMAGE)).isEqualTo(10);
+        assertThat(preset2.percent(CombatStatKey.ALL_STAT)).isEqualTo(40);
+    }
+
+    @Test
+    void luckyWeaponCanFillVacantSetWeaponSlot() throws Exception {
+        var itemEquipment = objectMapper.readTree("""
+                {
+                  "item_equipment_preset_1": [
+                    {"item_name": "앱솔랩스 나이트햇", "item_equipment_slot": "모자"},
+                    {"item_name": "앱솔랩스 나이트슈즈", "item_equipment_slot": "신발"},
+                    {"item_name": "앱솔랩스 나이트숄더", "item_equipment_slot": "어깨장식"},
+                    {"item_name": "제네시스 창세검", "item_equipment_slot": "무기"}
+                  ]
+                }
+                """);
+        var setEffect = objectMapper.readTree("""
+                {
+                  "set_effect": [
+                    {
+                      "set_name": "앱솔랩스 세트",
+                      "set_effect_info": []
+                    }
+                  ]
+                }
+                """);
+
+        PresetStatBundle bundle = extractor.extract(Map.of(
+                NexonEndpoint.ITEM_EQUIPMENT, itemEquipment,
+                NexonEndpoint.SET_EFFECT, setEffect
+        ), "히어로");
+
+        CombatStatBag preset1 = bundle.merged(Map.of("ITEM_EQUIPMENT", 1));
+
+        assertThat(preset1.percent(CombatStatKey.BOSS_DAMAGE)).isEqualTo(20);
+        assertThat(preset1.flat(CombatStatKey.ATTACK_POWER)).isEqualTo(65);
+    }
+
+    @Test
     void includesDragonEquipmentInCommonItemStats() throws Exception {
         var itemEquipment = objectMapper.readTree("""
                 {
@@ -87,9 +198,9 @@ class CombatStatExtractorTest {
 
         PresetStatBundle bundle = extractor.extract(Map.of(NexonEndpoint.ITEM_EQUIPMENT, itemEquipment), "렌");
 
-        assertThat(bundle.common().flat(CombatStatKey.ALL_STAT)).isZero();
-        assertThat(bundle.common().flat(CombatStatKey.ATTACK_POWER)).isZero();
-        assertThat(bundle.common().percent(CombatStatKey.BOSS_DAMAGE)).isZero();
+        assertThat(bundle.common().flat(CombatStatKey.ALL_STAT)).isEqualTo(30);
+        assertThat(bundle.common().flat(CombatStatKey.ATTACK_POWER)).isEqualTo(30);
+        assertThat(bundle.common().percent(CombatStatKey.BOSS_DAMAGE)).isEqualTo(20);
     }
 
     @Test
@@ -140,10 +251,10 @@ class CombatStatExtractorTest {
         PresetStatBundle bundle = extractor.extract(Map.of(NexonEndpoint.SKILL_0, skill0));
 
         assertThat(bundle.common().flat(CombatStatKey.STR)).isZero();
-        assertThat(bundle.common().flat(CombatStatKey.ATTACK_POWER)).isEqualTo(48);
-        assertThat(bundle.common().flat(CombatStatKey.MAGIC_ATTACK)).isEqualTo(48);
-        assertThat(bundle.common().flat(CombatStatKey.ALL_STAT)).isEqualTo(30);
-        assertThat(bundle.common().percent(CombatStatKey.BOSS_DAMAGE)).isEqualTo(80);
+        assertThat(bundle.common().flat(CombatStatKey.ATTACK_POWER)).isEqualTo(28);
+        assertThat(bundle.common().flat(CombatStatKey.MAGIC_ATTACK)).isEqualTo(28);
+        assertThat(bundle.common().flat(CombatStatKey.ALL_STAT)).isZero();
+        assertThat(bundle.common().percent(CombatStatKey.BOSS_DAMAGE)).isZero();
     }
 
     @Test

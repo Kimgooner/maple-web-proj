@@ -5,10 +5,12 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.whitedoggy.maplehistory.config.NexonApiProperties;
@@ -48,10 +50,10 @@ public class CombatPowerService {
                 .flatMap(identity -> Flux.range(0, Math.toIntExact(days))
                         .map(from::plusDays)
                         .flatMap(date -> nexonMapleClient.fetchSnapshot(identity.ocid(), date)
-                                .map(snapshot -> point(snapshot, mode)), properties.maxConcurrency())
-                        .sort(Comparator.comparing(CombatPowerPoint::date))
+                                .map(snapshot -> pointContext(snapshot, mode)), properties.maxConcurrency())
+                        .sort(Comparator.comparing(context -> context.point().date()))
                         .collectList()
-                        .map(points -> response(characterName, identity, from, to, mode, points)));
+                        .map(contexts -> response(characterName, identity, from, to, mode, enrichChanges(contexts))));
     }
 
     public Mono<CombatPowerDebugResponse> debug(String characterName, LocalDate date, PresetSelectionMode mode) {
@@ -71,7 +73,30 @@ public class CombatPowerService {
         return new CombatPowerTrendResponse(characterName, identity.ocid(), from, to, mode, points);
     }
 
+    private TrendPointContext pointContext(NexonCharacterSnapshot snapshot, PresetSelectionMode mode) {
+        Evaluation evaluation = evaluate(snapshot, mode);
+        CombatPowerPoint point = new CombatPowerPoint(
+                snapshot.date(),
+                evaluation.selected().presetNo(),
+                evaluation.selected().sourcePresetNos(),
+                evaluation.selected().combatPower(),
+                evaluation.nexonCombatPower(),
+                evaluation.delta(),
+                evaluation.deltaRate(),
+                evaluation.nexonCombatPower() != null && evaluation.currentPresetSelected(),
+                evaluation.selected().formula(),
+                evaluation.candidates(),
+                warnings(snapshot, evaluation.currentPresetNos(), evaluation.nexonCombatPower(), evaluation.currentPresetSelected()),
+                null
+        );
+        return new TrendPointContext(snapshot, point, evaluation.selectedStats(), mode);
+    }
+
     private CombatPowerPoint point(NexonCharacterSnapshot snapshot, PresetSelectionMode mode) {
+        return pointContext(snapshot, mode).point();
+    }
+
+    private Evaluation evaluate(NexonCharacterSnapshot snapshot, PresetSelectionMode mode) {
         String characterClass = characterClass(snapshot);
         Integer characterLevel = characterLevel(snapshot).orElse(null);
         PresetStatBundle bundle = statExtractor.extract(snapshot.documents(), characterClass);
@@ -96,66 +121,85 @@ public class CombatPowerService {
                 delta,
                 deltaRate
         );
-
-        List<String> warnings = warnings(snapshot, currentPresetNos, nexonCombatPower, currentPresetSelected);
-        return new CombatPowerPoint(
-                snapshot.date(),
-                selected.presetNo(),
-                selected.sourcePresetNos(),
-                selected.combatPower(),
-                nexonCombatPower,
-                delta,
-                deltaRate,
-                nexonCombatPower != null && currentPresetSelected,
-                selected.formula(),
+        return new Evaluation(
+                characterClass,
+                characterLevel,
+                currentPresetNos,
                 candidates,
-                warnings
+                selected,
+                selectedStats,
+                nexonCombatPower,
+                currentPresetSelected,
+                delta,
+                deltaRate
         );
     }
 
     private CombatPowerDebugResponse debugResponse(String characterName, String ocid, NexonCharacterSnapshot snapshot, PresetSelectionMode mode) {
-        String characterClass = characterClass(snapshot);
-        Integer characterLevel = characterLevel(snapshot).orElse(null);
-        PresetStatBundle bundle = statExtractor.extract(snapshot.documents(), characterClass);
-        Map<String, Integer> currentPresetNos = currentPresetNos(snapshot);
-        List<PresetCombatPower> candidates = candidates(snapshot, bundle, characterClass, characterLevel, currentPresetNos, mode);
-        PresetCombatPower selected = selectCandidate(candidates, mode);
-        CombatStatBag selectedStats = bundle.merged(selected.sourcePresetNos());
-        Long nexonCombatPower = finalStatCombatPower(snapshot.document(NexonEndpoint.STAT)).orElse(null);
-        boolean currentPresetSelected = selected.sourcePresetNos().equals(currentPresetNos)
-                || mode == PresetSelectionMode.CURRENT;
-        Long delta = nexonCombatPower == null || !currentPresetSelected ? null : selected.combatPower() - nexonCombatPower;
-        Double deltaRate = delta == null || nexonCombatPower == 0 ? null : delta / (double) nexonCombatPower;
+        Evaluation evaluation = evaluate(snapshot, mode);
         printSelectedStatDebug(
                 characterName,
                 snapshot,
                 mode,
-                selected,
-                selectedStats,
-                nexonCombatPower,
-                delta,
-                deltaRate
+                evaluation.selected(),
+                evaluation.selectedStats(),
+                evaluation.nexonCombatPower(),
+                evaluation.delta(),
+                evaluation.deltaRate()
         );
 
         return new CombatPowerDebugResponse(
                 characterName,
                 ocid,
                 snapshot.date(),
-                characterClass,
-                characterLevel,
+                evaluation.characterClass(),
+                evaluation.characterLevel(),
                 mode,
-                selected.presetNo(),
-                selected.sourcePresetNos(),
-                nexonCombatPower,
-                delta,
-                deltaRate,
-                selected.formula(),
-                trace(selected.formula()),
-                totals(selectedStats),
-                selectedStats.weaponNormalization(),
-                sourceTotals(selectedStats.contributions()),
-                selectedStats.contributions(),
-                candidates
+                evaluation.selected().presetNo(),
+                evaluation.selected().sourcePresetNos(),
+                evaluation.nexonCombatPower(),
+                evaluation.delta(),
+                evaluation.deltaRate(),
+                evaluation.selected().formula(),
+                trace(evaluation.selected().formula()),
+                totals(evaluation.selectedStats()),
+                evaluation.selectedStats().weaponNormalization(),
+                sourceTotals(evaluation.selectedStats().contributions()),
+                evaluation.selectedStats().contributions(),
+                evaluation.candidates()
+        );
+    }
+
+    private List<CombatPowerPoint> enrichChanges(List<TrendPointContext> contexts) {
+        List<CombatPowerPoint> points = new ArrayList<>();
+        TrendPointContext previous = null;
+        for (TrendPointContext current : contexts) {
+            CombatPowerChange change = previous == null ? null : compare(previous, current);
+            CombatPowerPoint point = new CombatPowerPoint(
+                    current.point().date(),
+                    current.point().selectedPresetNo(),
+                    current.point().selectedSourcePresetNos(),
+                    current.point().calculatedCombatPower(),
+                    current.point().nexonCurrentCombatPower(),
+                    current.point().verificationDelta(),
+                    current.point().verificationDeltaRate(),
+                    current.point().verifiedAgainstCurrentPreset(),
+                    current.point().formula(),
+                    current.point().presetCandidates(),
+                    current.point().warnings(),
+                    change
+            );
+            points.add(point);
+            previous = current;
+        }
+        return points;
+    }
+
+    private CombatPowerChange compare(TrendPointContext previous, TrendPointContext current) {
+        return new CombatPowerChange(
+                previous.point().date(),
+                totalChanges(previous.selectedStats(), current.selectedStats()),
+                detailChanges(previous, current)
         );
     }
 
@@ -822,6 +866,502 @@ public class CombatPowerService {
         System.out.println("note = exceptional options are added separately because raw item_total_option excludes them.");
     }
 
+    private List<CombatPowerTotalChange> totalChanges(CombatStatBag previous, CombatStatBag current) {
+        List<CombatPowerTotalChange> changes = new ArrayList<>();
+        collectTotalChanges(changes, "PERCENT", previous.percentValues(), current.percentValues());
+        collectTotalChanges(changes, "PERCENT_APPLIED_FLAT", previous.flatValues(), current.flatValues());
+        collectTotalChanges(changes, "PERCENT_NOT_APPLIED_FLAT", previous.finalFlatValues(), current.finalFlatValues());
+        return changes;
+    }
+
+    private void collectTotalChanges(
+            List<CombatPowerTotalChange> changes,
+            String bucket,
+            Map<CombatStatKey, ? extends Number> previous,
+            Map<CombatStatKey, ? extends Number> current
+    ) {
+        for (CombatStatKey key : CombatStatKey.values()) {
+            double before = previous.containsKey(key) ? previous.get(key).doubleValue() : 0.0d;
+            double after = current.containsKey(key) ? current.get(key).doubleValue() : 0.0d;
+            if (Double.compare(before, after) == 0) {
+                continue;
+            }
+            changes.add(new CombatPowerTotalChange(
+                    bucket,
+                    key.name(),
+                    totalChangeLabel(bucket, key),
+                    formatStatValue(bucket, before),
+                    formatStatValue(bucket, after),
+                    formatDeltaValue(bucket, after - before)
+            ));
+        }
+    }
+
+    private List<CombatPowerDetailChange> detailChanges(TrendPointContext previous, TrendPointContext current) {
+        List<CombatPowerDetailChange> changes = new ArrayList<>();
+        changes.addAll(equipmentChanges(previous, current));
+        changes.addAll(sourceStatChanges(previous.selectedStats(), current.selectedStats()));
+        return changes;
+    }
+
+    private List<CombatPowerDetailChange> equipmentChanges(TrendPointContext previous, TrendPointContext current) {
+        Map<String, JsonNode> previousItems = selectedEquipmentItems(previous.snapshot(), previous.point().selectedSourcePresetNos());
+        Map<String, JsonNode> currentItems = selectedEquipmentItems(current.snapshot(), current.point().selectedSourcePresetNos());
+        Set<String> slots = new LinkedHashSet<>();
+        slots.addAll(previousItems.keySet());
+        slots.addAll(currentItems.keySet());
+
+        List<CombatPowerDetailChange> changes = new ArrayList<>();
+        for (String slot : slots) {
+            if (shouldSkipEquipmentSlot(slot, current.mode())) {
+                continue;
+            }
+            JsonNode before = previousItems.get(slot);
+            JsonNode after = currentItems.get(slot);
+            if (equipmentSignature(before).equals(equipmentSignature(after))) {
+                continue;
+            }
+            changes.add(new CombatPowerDetailChange(
+                    "EQUIPMENT",
+                    "ITEM_EQUIPMENT",
+                    "장비",
+                    slot,
+                    equipmentChangeLines(before, after),
+                    equipmentSnapshot(before),
+                    equipmentSnapshot(after)
+            ));
+        }
+        return changes;
+    }
+
+    private boolean shouldSkipEquipmentSlot(String slot, PresetSelectionMode mode) {
+        if (slot == null || slot.isBlank()) {
+            return false;
+        }
+        return mode == PresetSelectionMode.BATTLE && slot.contains("예비 특수 반지");
+    }
+
+    private List<CombatPowerDetailChange> sourceStatChanges(CombatStatBag previous, CombatStatBag current) {
+        Map<String, SourceTotals> previousTotals = sourceTotals(previous.contributions());
+        Map<String, SourceTotals> currentTotals = sourceTotals(current.contributions());
+        Set<String> sources = new LinkedHashSet<>();
+        sources.addAll(previousTotals.keySet());
+        sources.addAll(currentTotals.keySet());
+
+        List<CombatPowerDetailChange> changes = new ArrayList<>();
+        for (String source : sources) {
+            if ("ITEM_EQUIPMENT".equals(source) || "CASH_ITEM_EQUIPMENT".equals(source)) {
+                continue;
+            }
+            List<String> lines = new ArrayList<>();
+            SourceTotals before = previousTotals.get(source);
+            SourceTotals after = currentTotals.get(source);
+            collectSourceLines(lines, "PERCENT", before == null ? Map.of() : before.percent(), after == null ? Map.of() : after.percent());
+            collectSourceLines(lines, "PERCENT_APPLIED_FLAT", before == null ? Map.of() : before.percentAppliedFlat(), after == null ? Map.of() : after.percentAppliedFlat());
+            collectSourceLines(lines, "PERCENT_NOT_APPLIED_FLAT", before == null ? Map.of() : before.percentNotAppliedFlat(), after == null ? Map.of() : after.percentNotAppliedFlat());
+            if (!lines.isEmpty()) {
+                changes.add(new CombatPowerDetailChange("STAT", source, sourceName(source), sourceName(source), lines, null, null));
+            }
+        }
+        return changes;
+    }
+
+    private void collectSourceLines(List<String> lines, String bucket, Map<String, Double> previous, Map<String, Double> current) {
+        Set<String> keys = new LinkedHashSet<>();
+        keys.addAll(previous.keySet());
+        keys.addAll(current.keySet());
+        for (String key : keys) {
+            double before = previous.getOrDefault(key, 0.0d);
+            double after = current.getOrDefault(key, 0.0d);
+            if (Double.compare(before, after) == 0) {
+                continue;
+            }
+            lines.add(totalChangeLabel(bucket, CombatStatKey.valueOf(key))
+                    + ": "
+                    + formatStatValue(bucket, before)
+                    + " -> "
+                    + formatStatValue(bucket, after)
+                    + " ("
+                    + formatDeltaValue(bucket, after - before)
+                    + ")");
+        }
+    }
+
+    private Map<String, JsonNode> selectedEquipmentItems(NexonCharacterSnapshot snapshot, Map<String, Integer> selectedSourcePresetNos) {
+        JsonNode document = snapshot.document(NexonEndpoint.ITEM_EQUIPMENT);
+        if (document == null || document.isNull()) {
+            return Map.of();
+        }
+        Integer presetNo = selectedSourcePresetNos.get("ITEM_EQUIPMENT");
+        JsonNode items = presetNo == null ? document.get("item_equipment") : document.get("item_equipment_preset_" + presetNo);
+        if ((items == null || !items.isArray()) && document.has("item_equipment")) {
+            items = document.get("item_equipment");
+        }
+        if (items == null || !items.isArray()) {
+            return Map.of();
+        }
+
+        Map<String, JsonNode> bySlot = new LinkedHashMap<>();
+        for (JsonNode item : items) {
+            String slot = item.path("item_equipment_slot").asText("");
+            if (slot.isBlank()) {
+                slot = item.path("item_equipment_part").asText("기타");
+            }
+            bySlot.put(slot, item);
+        }
+        return bySlot;
+    }
+
+    private String equipmentSignature(JsonNode item) {
+        return item == null || item.isNull() ? "" : item.toString();
+    }
+
+    private String equipmentChangeHeadline(JsonNode before, JsonNode after) {
+        if (before == null || before.isNull()) {
+            return "새 장비 장착";
+        }
+        if (after == null || after.isNull()) {
+            return "장비 해제";
+        }
+        String beforeName = before.path("item_name").asText("");
+        String afterName = after.path("item_name").asText("");
+        if (!beforeName.equals(afterName)) {
+            return "다른 장비 장착";
+        }
+        return "같은 이름의 장비지만 옵션 변화";
+    }
+
+    private String equipmentNameChange(JsonNode before, JsonNode after) {
+        return itemName(before) + " -> " + itemName(after);
+    }
+
+    private List<String> equipmentChangeLines(JsonNode before, JsonNode after) {
+        List<String> lines = new ArrayList<>();
+        lines.add(equipmentChangeHeadline(before, after));
+        lines.add(equipmentNameChange(before, after));
+        lines.addAll(equipmentStatDeltaLines(before, after));
+        lines.addAll(equipmentOptionDeltaLines(before, after));
+        return lines;
+    }
+
+    private List<String> equipmentStatDeltaLines(JsonNode before, JsonNode after) {
+        Map<String, Double> beforeValues = equipmentComparableStats(before);
+        Map<String, Double> afterValues = equipmentComparableStats(after);
+        List<String> lines = new ArrayList<>();
+        for (String key : equipmentStatOrder()) {
+            double beforeValue = beforeValues.getOrDefault(key, 0.0d);
+            double afterValue = afterValues.getOrDefault(key, 0.0d);
+            if (Double.compare(beforeValue, afterValue) == 0) {
+                continue;
+            }
+            lines.add(equipmentStatLabel(key)
+                    + ": "
+                    + formatEquipmentStatValue(key, beforeValue)
+                    + " -> "
+                    + formatEquipmentStatValue(key, afterValue)
+                    + " ("
+                    + formatEquipmentStatDelta(key, afterValue - beforeValue)
+                    + ")");
+        }
+        return lines;
+    }
+
+    private List<String> equipmentOptionDeltaLines(JsonNode before, JsonNode after) {
+        List<String> lines = new ArrayList<>();
+        addEquipmentOptionDelta(lines, "잠재 1", before, after, "potential_option_1");
+        addEquipmentOptionDelta(lines, "잠재 2", before, after, "potential_option_2");
+        addEquipmentOptionDelta(lines, "잠재 3", before, after, "potential_option_3");
+        addEquipmentOptionDelta(lines, "에디 1", before, after, "additional_potential_option_1");
+        addEquipmentOptionDelta(lines, "에디 2", before, after, "additional_potential_option_2");
+        addEquipmentOptionDelta(lines, "에디 3", before, after, "additional_potential_option_3");
+        return lines;
+    }
+
+    private void addEquipmentOptionDelta(List<String> lines, String label, JsonNode before, JsonNode after, String fieldName) {
+        String beforeValue = normalizedEquipmentOption(before, fieldName);
+        String afterValue = normalizedEquipmentOption(after, fieldName);
+        if (beforeValue.equals(afterValue)) {
+            return;
+        }
+        lines.add(label + ": " + beforeValue + " -> " + afterValue);
+    }
+
+    private String normalizedEquipmentOption(JsonNode item, String fieldName) {
+        if (item == null || item.isNull()) {
+            return "없음";
+        }
+        String value = item.path(fieldName).asText("");
+        if (value == null || value.isBlank() || "null".equalsIgnoreCase(value)) {
+            return "없음";
+        }
+        return value;
+    }
+
+    private Map<String, Double> equipmentComparableStats(JsonNode item) {
+        if (item == null || item.isNull()) {
+            return Map.of();
+        }
+        Map<String, Double> values = new LinkedHashMap<>();
+        JsonNode total = item.get("item_total_option");
+        if (total != null && !total.isNull()) {
+            putEquipmentStat(values, total, "str");
+            putEquipmentStat(values, total, "dex");
+            putEquipmentStat(values, total, "int");
+            putEquipmentStat(values, total, "luk");
+            putEquipmentStat(values, total, "max_hp");
+            putEquipmentStat(values, total, "max_mp");
+            putEquipmentStat(values, total, "attack_power");
+            putEquipmentStat(values, total, "magic_power");
+            putEquipmentStat(values, total, "boss_damage");
+            putEquipmentStat(values, total, "ignore_monster_armor");
+            putEquipmentStat(values, total, "all_stat");
+            putEquipmentStat(values, total, "damage");
+            putEquipmentStat(values, total, "max_hp_rate");
+            putEquipmentStat(values, total, "max_mp_rate");
+        }
+        values.put("starforce", parseDouble(item.path("starforce").asText("")));
+        values.put("scroll_upgrade", parseDouble(item.path("scroll_upgrade").asText("")));
+        return values;
+    }
+
+    private void putEquipmentStat(Map<String, Double> values, JsonNode node, String field) {
+        if (!node.hasNonNull(field)) {
+            return;
+        }
+        double value = parseDouble(node.get(field).asText(""));
+        if (Double.compare(value, 0.0d) != 0) {
+            values.put(field, value);
+        }
+    }
+
+    private List<String> equipmentStatOrder() {
+        return List.of(
+                "str", "dex", "int", "luk",
+                "max_hp", "max_mp",
+                "attack_power", "magic_power",
+                "boss_damage", "ignore_monster_armor",
+                "all_stat", "damage",
+                "max_hp_rate", "max_mp_rate",
+                "starforce", "scroll_upgrade"
+        );
+    }
+
+    private String equipmentStatLabel(String key) {
+        return switch (key) {
+            case "str" -> "힘";
+            case "dex" -> "민첩";
+            case "int" -> "인트";
+            case "luk" -> "럭";
+            case "max_hp" -> "최대 HP";
+            case "max_mp" -> "최대 MP";
+            case "attack_power" -> "공격력";
+            case "magic_power" -> "마력";
+            case "boss_damage" -> "보스 데미지";
+            case "ignore_monster_armor" -> "방무";
+            case "all_stat" -> "올스탯";
+            case "damage" -> "데미지";
+            case "max_hp_rate" -> "최대 HP%";
+            case "max_mp_rate" -> "최대 MP%";
+            case "starforce" -> "스타포스";
+            case "scroll_upgrade" -> "주문서";
+            default -> key;
+        };
+    }
+
+    private String formatEquipmentStatValue(String key, double value) {
+        String suffix = equipmentPercentStat(key) ? "%" : equipmentCountSuffix(key);
+        return formatPlainNumber(value) + suffix;
+    }
+
+    private String formatEquipmentStatDelta(String key, double value) {
+        String prefix = value > 0 ? "+" : "";
+        String suffix = equipmentPercentStat(key) ? "%" : equipmentCountSuffix(key);
+        return prefix + formatPlainNumber(value) + suffix;
+    }
+
+    private boolean equipmentPercentStat(String key) {
+        return Set.of("boss_damage", "ignore_monster_armor", "all_stat", "damage", "max_hp_rate", "max_mp_rate").contains(key);
+    }
+
+    private String equipmentCountSuffix(String key) {
+        if ("starforce".equals(key)) {
+            return "성";
+        }
+        if ("scroll_upgrade".equals(key)) {
+            return "회";
+        }
+        return "";
+    }
+
+    private String itemName(JsonNode item) {
+        if (item == null || item.isNull()) {
+            return "없음";
+        }
+        return item.path("item_name").asText("알 수 없음");
+    }
+
+    private CombatPowerEquipmentSnapshot equipmentSnapshot(JsonNode item) {
+        if (item == null || item.isNull()) {
+            return null;
+        }
+        return new CombatPowerEquipmentSnapshot(
+                item.path("item_name").asText("알 수 없음"),
+                item.path("item_icon").asText(null),
+                equipmentTooltipLines(item)
+        );
+    }
+
+    private List<String> equipmentTooltipLines(JsonNode item) {
+        List<String> lines = new ArrayList<>();
+        addStructuredTooltip(lines, "총 옵션", item.get("item_total_option"));
+        addStructuredTooltip(lines, "기본 옵션", item.get("item_base_option"));
+        addStructuredTooltip(lines, "추가 옵션", item.get("item_add_option"));
+        addStructuredTooltip(lines, "기타 옵션", item.get("item_etc_option"));
+        addStructuredTooltip(lines, "스타포스 옵션", item.get("item_starforce_option"));
+        addStructuredTooltip(lines, "익셉셔널", item.get("item_exceptional_option"));
+
+        String starforce = item.path("starforce").asText("");
+        if (!starforce.isBlank() && !"0".equals(starforce)) {
+            lines.add("스타포스: " + starforce + "성");
+        }
+        String scrollUpgrade = item.path("scroll_upgrade").asText("");
+        if (!scrollUpgrade.isBlank() && !"0".equals(scrollUpgrade)) {
+            lines.add("주문서: " + scrollUpgrade + "회");
+        }
+        appendOptionLines(lines, "잠재", item.path("potential_option_grade").asText(null), item,
+                "potential_option_1", "potential_option_2", "potential_option_3");
+        appendOptionLines(lines, "에디", item.path("additional_potential_option_grade").asText(null), item,
+                "additional_potential_option_1", "additional_potential_option_2", "additional_potential_option_3");
+        appendSingleLine(lines, "소울", item.path("soul_option").asText(null));
+        appendSingleLine(lines, "설명", item.path("item_description").asText(null));
+        return lines;
+    }
+
+    private void addStructuredTooltip(List<String> lines, String label, JsonNode options) {
+        if (options == null || options.isNull()) {
+            return;
+        }
+        List<String> values = new ArrayList<>();
+        collectStructuredOption(options, values, "str", "STR", false);
+        collectStructuredOption(options, values, "dex", "DEX", false);
+        collectStructuredOption(options, values, "int", "INT", false);
+        collectStructuredOption(options, values, "luk", "LUK", false);
+        collectStructuredOption(options, values, "max_hp", "최대 HP", false);
+        collectStructuredOption(options, values, "max_mp", "최대 MP", false);
+        collectStructuredOption(options, values, "attack_power", "공격력", false);
+        collectStructuredOption(options, values, "magic_power", "마력", false);
+        collectStructuredOption(options, values, "boss_damage", "보스 데미지", true);
+        collectStructuredOption(options, values, "ignore_monster_armor", "방무", true);
+        collectStructuredOption(options, values, "all_stat", "올스탯", true);
+        collectStructuredOption(options, values, "damage", "데미지", true);
+        collectStructuredOption(options, values, "max_hp_rate", "최대 HP", true);
+        collectStructuredOption(options, values, "max_mp_rate", "최대 MP", true);
+        if (!values.isEmpty()) {
+            lines.add(label + ": " + String.join(", ", values));
+        }
+    }
+
+    private void collectStructuredOption(JsonNode options, List<String> values, String field, String label, boolean percent) {
+        if (!options.hasNonNull(field)) {
+            return;
+        }
+        double value = parseDouble(options.get(field).asText(""));
+        if (Double.compare(value, 0.0d) == 0) {
+            return;
+        }
+        values.add(label + " +" + formatPlainNumber(value) + (percent ? "%" : ""));
+    }
+
+    private void appendOptionLines(List<String> lines, String label, String grade, JsonNode item, String... fields) {
+        List<String> values = new ArrayList<>();
+        for (String field : fields) {
+            String value = item.path(field).asText(null);
+            if (value != null && !value.isBlank() && !"null".equalsIgnoreCase(value)) {
+                values.add(value);
+            }
+        }
+        if (!values.isEmpty()) {
+            lines.add(label + (grade == null || grade.isBlank() ? "" : "(" + grade + ")") + ": " + String.join(" / ", values));
+        }
+    }
+
+    private void appendSingleLine(List<String> lines, String label, String value) {
+        if (value == null || value.isBlank() || "null".equalsIgnoreCase(value)) {
+            return;
+        }
+        lines.add(label + ": " + value.replace("\r", " ").replace("\n", " "));
+    }
+
+    private String totalChangeLabel(String bucket, CombatStatKey key) {
+        return switch (bucket) {
+            case "PERCENT_APPLIED_FLAT" -> statName(key) + "(적용)";
+            case "PERCENT_NOT_APPLIED_FLAT" -> statName(key) + "(미적용)";
+            default -> statName(key);
+        };
+    }
+
+    private String statName(CombatStatKey key) {
+        return switch (key) {
+            case STR -> "힘";
+            case DEX -> "민첩";
+            case INT -> "인트";
+            case LUK -> "럭";
+            case MAX_HP -> "최대 HP";
+            case ALL_STAT -> "올스탯";
+            case ATTACK_POWER -> "공격력";
+            case MAGIC_ATTACK -> "마력";
+            case DAMAGE -> "데미지";
+            case BOSS_DAMAGE -> "보스 데미지";
+            case CRITICAL_DAMAGE -> "크리티컬 데미지";
+            case FINAL_DAMAGE -> "최종 데미지";
+        };
+    }
+
+    private String sourceName(String source) {
+        return switch (source) {
+            case "SET_EFFECT" -> "세트 효과";
+            case "SYMBOL_EQUIPMENT" -> "심볼";
+            case "PET_EQUIPMENT" -> "펫 장비";
+            case "SKILL_0" -> "0차 스킬";
+            case "HEXA_MATRIX_STAT" -> "헥사 스탯";
+            case "UNION_CHAMPION" -> "유니온 챔피언";
+            case "UNION_ARTIFACT" -> "유니온 아티팩트";
+            case "UNION_RAIDER" -> "유니온 공격대";
+            case "HYPER_STAT" -> "하이퍼 스탯";
+            case "ABILITY" -> "어빌리티";
+            case "WEAPON_NORMALIZATION" -> "무기 보정";
+            default -> source;
+        };
+    }
+
+    private String formatStatValue(String bucket, double value) {
+        return formatPlainNumber(value) + ("PERCENT".equals(bucket) ? "%" : "");
+    }
+
+    private String formatDeltaValue(String bucket, double delta) {
+        String prefix = delta > 0 ? "+" : "";
+        return prefix + formatPlainNumber(delta) + ("PERCENT".equals(bucket) ? "%" : "");
+    }
+
+    private String formatPlainNumber(double value) {
+        long rounded = Math.round(value);
+        if (Math.abs(value - rounded) < 0.0000001d) {
+            return Long.toString(rounded);
+        }
+        return String.format(java.util.Locale.ROOT, "%.1f", value);
+    }
+
+    private double parseDouble(String value) {
+        if (value == null || value.isBlank()) {
+            return 0.0d;
+        }
+        try {
+            return Double.parseDouble(value.replace(",", ""));
+        } catch (NumberFormatException ignored) {
+            return 0.0d;
+        }
+    }
+
     private void addExceptionalIfPresent(CombatStatBag totals, JsonNode exceptional, String field, CombatStatKey key) {
         if (!exceptional.hasNonNull(field)) {
             return;
@@ -858,5 +1398,27 @@ public class CombatPowerService {
         }
         System.out.println("  " + bucketName + ":");
         values.forEach((stat, value) -> System.out.printf("    %-20s %.2f%n", stat, value));
+    }
+
+    private record Evaluation(
+            String characterClass,
+            Integer characterLevel,
+            Map<String, Integer> currentPresetNos,
+            List<PresetCombatPower> candidates,
+            PresetCombatPower selected,
+            CombatStatBag selectedStats,
+            Long nexonCombatPower,
+            boolean currentPresetSelected,
+            Long delta,
+            Double deltaRate
+    ) {
+    }
+
+    private record TrendPointContext(
+            NexonCharacterSnapshot snapshot,
+            CombatPowerPoint point,
+            CombatStatBag selectedStats,
+            PresetSelectionMode mode
+    ) {
     }
 }

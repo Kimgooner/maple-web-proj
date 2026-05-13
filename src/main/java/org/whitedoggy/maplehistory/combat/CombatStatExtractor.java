@@ -1,5 +1,8 @@
 package org.whitedoggy.maplehistory.combat;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -19,6 +22,16 @@ public class CombatStatExtractor {
     private static final Pattern NUMBER = Pattern.compile("[-+]?\\d+(?:\\.\\d+)?");
     private static final Pattern LEVEL_SCALING_OPTION = Pattern.compile("캐릭터 기준\\s*(\\d+)레벨 당\\s*(.+?)\\s*\\+?(-?\\d+(?:\\.\\d+)?)");
 
+    private final EquipmentSetTable equipmentSetTable;
+
+    public CombatStatExtractor() {
+        this(EquipmentSetTable.loadDefault());
+    }
+
+    CombatStatExtractor(EquipmentSetTable equipmentSetTable) {
+        this.equipmentSetTable = equipmentSetTable;
+    }
+
     public PresetStatBundle extract(
             Map<NexonEndpoint, JsonNode> documents,
             String characterClass) {
@@ -26,14 +39,17 @@ public class CombatStatExtractor {
         CharacterStatProfile profile = CharacterStatProfile.from(characterClass);
         Integer characterLevel = characterLevel(documents.get(NexonEndpoint.BASIC)).orElse(null);
         Set<String> skill0Names = skill0Names(documents.get(NexonEndpoint.SKILL_0));
+        JsonNode itemEquipment = documents.get(NexonEndpoint.ITEM_EQUIPMENT);
         documents.forEach((endpoint, document) -> {
-            if (document == null || document.isNull() || endpoint == NexonEndpoint.STAT || endpoint == NexonEndpoint.BASIC) {
+            if (document == null || document.isNull()
+                    || endpoint == NexonEndpoint.STAT
+                    || endpoint == NexonEndpoint.BASIC
+                    || endpoint == NexonEndpoint.SET_EFFECT) {
                 return;
             }
             switch (endpoint) {
                 case ITEM_EQUIPMENT -> extractItemEquipment(document, bundle, profile, characterLevel, skill0Names);
                 case CASH_ITEM_EQUIPMENT -> extractCashItemEquipment(document, bundle, characterLevel);
-                case SET_EFFECT -> extractSetEffect(document, bundle.common());
                 case SYMBOL_EQUIPMENT -> extractSymbol(document, bundle.common());
                 case ABILITY -> extractAbility(document, bundle);
                 case HYPER_STAT -> extractHyperStat(document, bundle);
@@ -45,6 +61,7 @@ public class CombatStatExtractor {
                 default -> extractGeneric(endpoint, document, bundle.common(), characterLevel);
             }
         });
+        extractSetEffect(documents.get(NexonEndpoint.SET_EFFECT), itemEquipment, bundle);
         addProjectileFallback(characterClass, bundle.common());
 
         return bundle;
@@ -234,22 +251,334 @@ public class CombatStatExtractor {
         }
     }
 
-    private void extractSetEffect(JsonNode document, CombatStatBag bag) {
+    private void extractSetEffect(JsonNode document, JsonNode itemEquipment, PresetStatBundle bundle) {
+        if (document == null || document.isNull()) {
+            return;
+        }
         JsonNode setEffects = document.get("set_effect");
         if (setEffects == null || !setEffects.isArray()) {
             return;
         }
+        Map<Integer, List<EquippedItem>> equippedItemsByPreset = equippedItemsByPreset(itemEquipment);
+        if (equippedItemsByPreset.isEmpty()) {
+            for (JsonNode setEffect : setEffects) {
+                applyActiveSetEffect(setEffect, bundle.common());
+            }
+            return;
+        }
+        for (Map.Entry<Integer, List<EquippedItem>> entry : equippedItemsByPreset.entrySet()) {
+            EquipmentSetTable.LuckyItem activeLuckyItem = activeLuckyItem(entry.getValue()).orElse(null);
+            for (EquipmentSetTable.Definition definition : equipmentSetTable.definitions()) {
+                LuckySetResolution resolution = resolveSetCount(entry.getValue(), definition, activeLuckyItem);
+                int setCount = resolution.count();
+                if (setCount <= 0) {
+                    continue;
+                }
+                applySetEffectUpToCount(
+                        definition,
+                        setCount,
+                        resolution.luckyItemName(),
+                        bundle.sourcePreset("SET_EFFECT", entry.getKey())
+                );
+            }
+        }
         for (JsonNode setEffect : setEffects) {
-            JsonNode activeEffects = setEffect.get("set_effect_info");
-            if (activeEffects == null || !activeEffects.isArray()) {
+            String setName = setEffect.path("set_name").asText("");
+            if (equipmentSetTable.definition(setName) != null) {
                 continue;
             }
-            for (JsonNode activeEffect : activeEffects) {
-                if (activeEffect.hasNonNull("set_option")) {
-                    parseOptionText(NexonEndpoint.SET_EFFECT, setEffect.path("set_name").asText("set_option"), activeEffect.get("set_option").asText(), bag, false);
+            applyActiveSetEffect(setEffect, bundle.common());
+        }
+    }
+
+    private Map<Integer, List<EquippedItem>> equippedItemsByPreset(JsonNode itemEquipment) {
+        if (itemEquipment == null || itemEquipment.isNull()) {
+            return Map.of();
+        }
+        Map<Integer, List<EquippedItem>> byPreset = new LinkedHashMap<>();
+        for (String field : itemEquipment.propertyNames()) {
+            Optional<Integer> presetNo = presetNo(field);
+            if (presetNo.isEmpty()) {
+                continue;
+            }
+            JsonNode items = itemEquipment.get(field);
+            if (items == null || !items.isArray()) {
+                continue;
+            }
+            byPreset.put(presetNo.get(), equippedItems(items));
+        }
+        return byPreset;
+    }
+
+    private List<EquippedItem> equippedItems(JsonNode items) {
+        List<EquippedItem> equippedItems = new ArrayList<>();
+        for (JsonNode item : items) {
+            String name = item.path("item_name").asText("");
+            if (!name.isBlank()) {
+                equippedItems.add(new EquippedItem(name, normalizedEquipmentSlot(item)));
+            }
+        }
+        return equippedItems;
+    }
+
+    /*
+    private Map<Integer, Integer> inferSetCounts(String setName, Map<Integer, List<String>> itemNamesByPreset) {
+        if (itemNamesByPreset.isEmpty()) {
+            return Map.of();
+        }
+        List<String> hints = setNameHints(setName);
+        if (hints.isEmpty()) {
+            return Map.of();
+        }
+        Map<Integer, Integer> counts = new LinkedHashMap<>();
+        for (Map.Entry<Integer, List<String>> entry : itemNamesByPreset.entrySet()) {
+            int count = 0;
+            for (String itemName : entry.getValue()) {
+                String normalizedItem = normalizeName(itemName);
+                if (hints.stream().anyMatch(normalizedItem::contains)) {
+                    count++;
+                }
+            }
+            counts.put(entry.getKey(), count);
+        }
+        return counts;
+    }
+
+    private List<String> setNameHints(String setName) {
+        String normalized = normalizeName(setName);
+        if (normalized.startsWith("여명의보스세트")) {
+            return normalizeAll(List.of(
+                    "데이브레이크",
+                    "에스텔라",
+                    "트와일라이트",
+                    "가디언엔젤"
+            ));
+        }
+        if (normalized.startsWith("보스장신구세트")) {
+            return normalizeAll(List.of(
+                    "크리스탈웬투스",
+                    "골든클로버",
+                    "핑크빛성배",
+                    "파풀라투스",
+                    "도미네이터",
+                    "실버블라썸",
+                    "데아시두스",
+                    "응축된힘의결정석",
+                    "아쿠아틱레터",
+                    "블랙빈"
+            ));
+        }
+
+        String prefix = setName.replaceAll("\\(.*?\\)", "");
+        int setIndex = prefix.indexOf("세트");
+        if (setIndex >= 0) {
+            prefix = prefix.substring(0, setIndex);
+        }
+        prefix = normalizeName(prefix);
+        if (prefix.isBlank() || prefix.endsWith("보스") || prefix.endsWith("장신구")) {
+            return List.of();
+        }
+        return List.of(prefix);
+    }
+
+    private List<String> normalizeAll(List<String> values) {
+        return values.stream()
+                .map(this::normalizeName)
+                .toList();
+    }
+
+    private String normalizeName(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replaceAll("[\\s:,'\"·.\\-]", "");
+    }
+
+    private int matchedSetItemCount(EquipmentSetTable.Definition definition, List<String> itemNames) {
+        if (itemNames == null || itemNames.isEmpty()) {
+            return 0;
+        }
+        List<String> normalizedSetItems = definition.normalizedItems();
+        int count = 0;
+        for (String itemName : itemNames) {
+            String normalizedItemName = EquipmentSetTable.normalizeName(itemName);
+            if (normalizedSetItems.contains(normalizedItemName)) {
+                count++;
+            }
+        }
+        return count;
+    }
+    */
+
+    private LuckySetResolution resolveSetCount(
+            List<EquippedItem> equippedItems,
+            EquipmentSetTable.Definition definition,
+            EquipmentSetTable.LuckyItem activeLuckyItem
+    ) {
+        if (equippedItems == null || equippedItems.isEmpty()) {
+            return new LuckySetResolution(0, null);
+        }
+
+        int baseCount = 0;
+        Set<String> occupiedSlots = new java.util.LinkedHashSet<>();
+        for (EquippedItem equippedItem : equippedItems) {
+            if (isMatchedSetItem(definition, equippedItem)) {
+                baseCount++;
+                if (!equippedItem.slot().isBlank()) {
+                    occupiedSlots.add(equippedItem.slot());
                 }
             }
         }
+
+        if (baseCount < 3) {
+            return new LuckySetResolution(baseCount, null);
+        }
+
+        if (activeLuckyItem == null) {
+            return new LuckySetResolution(baseCount, null);
+        }
+
+        if (!activeLuckyItem.appliesTo(definition.name())
+                || activeLuckyItem.slot().isBlank()
+                || !definition.supportsLuckySlot(activeLuckyItem.slot())
+                || occupiedSlots.contains(activeLuckyItem.slot())) {
+            return new LuckySetResolution(baseCount, null);
+        }
+
+        return new LuckySetResolution(baseCount + 1, activeLuckyItem.name());
+    }
+
+    private boolean isMatchedSetItem(EquipmentSetTable.Definition definition, EquippedItem equippedItem) {
+        return definition.matches(equippedItem.name(), equippedItem.slot());
+    }
+
+    private Optional<EquipmentSetTable.LuckyItem> activeLuckyItem(List<EquippedItem> equippedItems) {
+        List<EquipmentSetTable.LuckyItem> candidates = equippedItems.stream()
+                .map(item -> equipmentSetTable.luckyItem(item.name(), item.slot()))
+                .flatMap(Optional::stream)
+                .distinct()
+                .toList();
+        return candidates.stream()
+                .max(java.util.Comparator
+                        .comparingInt((EquipmentSetTable.LuckyItem luckyItem) -> luckyItemBenefit(equippedItems, luckyItem))
+                        .thenComparingInt(luckyItem -> -luckyItem.priority())
+                );
+    }
+
+    private int luckyItemBenefit(List<EquippedItem> equippedItems, EquipmentSetTable.LuckyItem luckyItem) {
+        int benefit = 0;
+        for (EquipmentSetTable.Definition definition : equipmentSetTable.definitions()) {
+            if (!luckyItem.appliesTo(definition.name())
+                    || luckyItem.slot().isBlank()
+                    || !definition.supportsLuckySlot(luckyItem.slot())) {
+                continue;
+            }
+            int baseCount = 0;
+            boolean occupied = false;
+            for (EquippedItem equippedItem : equippedItems) {
+                if (isMatchedSetItem(definition, equippedItem)) {
+                    baseCount++;
+                    if (luckyItem.slot().equals(equippedItem.slot())) {
+                        occupied = true;
+                    }
+                }
+            }
+            if (baseCount >= 3 && !occupied) {
+                benefit++;
+            }
+        }
+        return benefit;
+    }
+
+    private String normalizedEquipmentSlot(JsonNode item) {
+        String slot = item.path("item_equipment_slot").asText("");
+        if (slot.isBlank()) {
+            slot = item.path("item_equipment_part").asText("");
+        }
+        if (slot.startsWith("반지")) {
+            return "반지";
+        }
+        if (slot.startsWith("펜던트")) {
+            return "펜던트";
+        }
+        return slot;
+    }
+
+    private void applyActiveSetEffect(JsonNode setEffect, CombatStatBag bag) {
+        JsonNode activeEffects = setEffect.get("set_effect_info");
+        if (activeEffects == null || !activeEffects.isArray()) {
+            return;
+        }
+        for (JsonNode activeEffect : activeEffects) {
+            if (activeEffect.hasNonNull("set_option")) {
+                parseOptionText(
+                        NexonEndpoint.SET_EFFECT,
+                        setEffect.path("set_name").asText("set_option"),
+                        activeEffect.get("set_option").asText(),
+                        bag,
+                        false
+                );
+            }
+        }
+    }
+
+    private void applySetEffectUpToCount(
+            EquipmentSetTable.Definition definition,
+            int setCount,
+            String luckyItemName,
+            CombatStatBag bag
+    ) {
+        if (setCount <= 0) {
+            return;
+        }
+        for (EquipmentSetTable.Effect effect : definition.effects()) {
+            if (effect.count() > setCount) {
+                continue;
+            }
+            parseOptionText(
+                    NexonEndpoint.SET_EFFECT,
+                    luckyItemName == null ? definition.name() : definition.name() + " [럭키:" + luckyItemName + "]",
+                    effect.option(),
+                    bag,
+                    false
+            );
+        }
+    }
+
+    private void applySetEffectUpToCount(JsonNode setEffect, int setCount, CombatStatBag bag) {
+        if (setCount <= 0) {
+            return;
+        }
+        JsonNode fullEffects = setEffect.get("set_option_full");
+        if (fullEffects == null || !fullEffects.isArray()) {
+            applyActiveSetEffect(setEffect, bag);
+            return;
+        }
+        for (JsonNode fullEffect : fullEffects) {
+            int requiredCount = intField(fullEffect, "set_count").orElse(Integer.MAX_VALUE);
+            if (requiredCount > setCount || !fullEffect.hasNonNull("set_option")) {
+                continue;
+            }
+            parseOptionText(
+                    NexonEndpoint.SET_EFFECT,
+                    setEffect.path("set_name").asText("set_option"),
+                    fullEffect.get("set_option").asText(),
+                    bag,
+                    false
+            );
+        }
+    }
+
+    private record EquippedItem(
+            String name,
+            String slot
+    ) {
+    }
+
+    private record LuckySetResolution(
+            int count,
+            String luckyItemName
+    ) {
     }
 
     private void extractSymbol(JsonNode document, CombatStatBag bag) {
@@ -828,6 +1157,21 @@ public class CombatStatExtractor {
             return Optional.of(3);
         }
         return Optional.empty();
+    }
+
+    private Optional<Integer> intField(JsonNode node, String fieldName) {
+        if (node == null || node.isNull() || !node.hasNonNull(fieldName)) {
+            return Optional.empty();
+        }
+        JsonNode value = node.get(fieldName);
+        if (value.isInt()) {
+            return Optional.of(value.asInt());
+        }
+        try {
+            return Optional.of(Integer.parseInt(value.asText()));
+        } catch (NumberFormatException ignored) {
+            return Optional.empty();
+        }
     }
 
     private Optional<Double> parseNumber(String value) {

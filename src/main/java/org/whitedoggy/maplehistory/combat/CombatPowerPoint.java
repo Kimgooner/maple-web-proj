@@ -15,6 +15,7 @@ public record CombatPowerPoint(
         boolean verifiedAgainstCurrentPreset,
         CombatPowerCalculation formula,
         List<PresetCombatPower> presetCandidates,
-        List<String> warnings
+        List<String> warnings,
+        CombatPowerChange changeFromPrevious
 ) {
 }

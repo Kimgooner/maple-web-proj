@@ -49,6 +49,15 @@ public final class PresetStatBundle {
                 merged.merge(sourceBag);
             }
         }
+        Integer itemPresetNo = presetNos.get("ITEM_EQUIPMENT");
+        if (itemPresetNo != null && !presetNos.containsKey("SET_EFFECT")) {
+            CombatStatBag setEffectBag = sourcePresets
+                    .getOrDefault("SET_EFFECT", Map.of())
+                    .get(itemPresetNo);
+            if (setEffectBag != null) {
+                merged.merge(setEffectBag);
+            }
+        }
         return merged;
     }
 

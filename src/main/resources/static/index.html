@@ -7,87 +7,159 @@
     <style>
         :root {
             color-scheme: light;
-            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            color: #1b1f24;
-            background: #f6f8fb;
+            --bg: #f4f6f3;
+            --panel: #fcfcf8;
+            --panel-strong: #ffffff;
+            --line: #d9ddcf;
+            --text: #1f241d;
+            --muted: #5f695c;
+            --accent: #1f7a4f;
+            --accent-soft: #e6f4ec;
+            --danger: #b64b4b;
+            --shadow: 0 18px 50px rgba(42, 54, 34, 0.08);
+            font-family: "Pretendard", "Noto Sans KR", sans-serif;
+        }
+
+        * {
+            box-sizing: border-box;
         }
 
         body {
             margin: 0;
+            color: var(--text);
+            background:
+                    radial-gradient(circle at top left, rgba(99, 153, 92, 0.15), transparent 32%),
+                    linear-gradient(180deg, #eef3ea 0%, var(--bg) 28%, #f8f9f5 100%);
         }
 
         main {
-            max-width: 1040px;
+            max-width: 1180px;
             margin: 0 auto;
-            padding: 40px 20px;
+            padding: 40px 20px 72px;
+        }
+
+        .hero {
+            margin-bottom: 22px;
         }
 
         h1 {
-            margin: 0 0 24px;
-            font-size: 30px;
-            letter-spacing: 0;
+            margin: 0;
+            font-size: clamp(30px, 4vw, 46px);
+            font-weight: 800;
+            letter-spacing: -0.04em;
+        }
+
+        .hero p {
+            margin: 10px 0 0;
+            color: var(--muted);
+            font-size: 15px;
+        }
+
+        .panel {
+            background: rgba(252, 252, 248, 0.9);
+            border: 1px solid rgba(217, 221, 207, 0.9);
+            border-radius: 24px;
+            box-shadow: var(--shadow);
+            backdrop-filter: blur(14px);
         }
 
         form {
             display: grid;
-            grid-template-columns: minmax(180px, 1fr) 150px 150px 140px auto;
-            gap: 10px;
-            align-items: end;
-            margin-bottom: 22px;
+            grid-template-columns: minmax(180px, 1.3fr) repeat(3, minmax(130px, 1fr)) auto;
+            gap: 12px;
+            padding: 20px;
+            margin-bottom: 18px;
         }
 
         label {
             display: grid;
-            gap: 6px;
-            font-size: 13px;
+            gap: 7px;
+            font-size: 12px;
             font-weight: 700;
-            color: #49515c;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
         }
 
         input,
         select,
         button {
-            height: 42px;
-            border-radius: 6px;
-            border: 1px solid #cbd3df;
-            padding: 0 12px;
+            width: 100%;
+            min-height: 46px;
+            border-radius: 14px;
+            border: 1px solid var(--line);
+            padding: 0 14px;
             font: inherit;
-            background: white;
-            box-sizing: border-box;
+        }
+
+        input,
+        select {
+            background: rgba(255, 255, 255, 0.92);
+            color: var(--text);
         }
 
         button {
-            border-color: #2456d6;
-            background: #2456d6;
+            align-self: end;
+            border: 0;
+            background: linear-gradient(135deg, #235d3f 0%, #31955e 100%);
             color: white;
             font-weight: 800;
             cursor: pointer;
         }
 
         button:disabled {
-            opacity: 0.55;
+            opacity: 0.6;
             cursor: wait;
         }
 
         .status {
             min-height: 24px;
-            margin-bottom: 12px;
-            color: #596270;
+            margin: 0 4px 16px;
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        .empty,
+        .results-shell {
+            padding: 28px;
+        }
+
+        .empty {
+            text-align: center;
+            color: var(--muted);
+        }
+
+        .results-shell {
+            display: grid;
+            gap: 28px;
+        }
+
+        .section-title {
+            margin: 0 0 14px;
+            font-size: 18px;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
         }
 
         table {
             width: 100%;
             border-collapse: collapse;
-            background: white;
-            border: 1px solid #dbe1ea;
+            background: var(--panel-strong);
+            border-radius: 18px;
+            overflow: hidden;
         }
 
         th,
         td {
-            padding: 12px;
-            border-bottom: 1px solid #e6ebf2;
+            padding: 14px 12px;
+            border-bottom: 1px solid #edf0e6;
             text-align: right;
             white-space: nowrap;
+            font-size: 14px;
         }
 
         th:first-child,
@@ -96,20 +168,182 @@
         }
 
         th {
-            background: #eef2f7;
-            color: #374151;
+            background: #eff4ea;
+            color: #394336;
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        tbody tr:last-child td {
+            border-bottom: 0;
+        }
+
+        .delta-positive {
+            color: var(--accent);
+            font-weight: 700;
+        }
+
+        .delta-negative {
+            color: var(--danger);
+            font-weight: 700;
+        }
+
+        .change-list {
+            display: grid;
+            gap: 18px;
+        }
+
+        .change-card {
+            padding: 22px;
+            background: rgba(255, 255, 255, 0.76);
+            border: 1px solid rgba(217, 221, 207, 0.94);
+            border-radius: 22px;
+        }
+
+        .change-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: baseline;
+            margin-bottom: 18px;
+        }
+
+        .change-head h3 {
+            margin: 0;
+            font-size: 20px;
+            letter-spacing: -0.03em;
+        }
+
+        .change-head span {
+            color: var(--muted);
             font-size: 13px;
         }
 
-        .empty {
-            padding: 28px;
-            text-align: center;
-            color: #697386;
-            background: white;
-            border: 1px solid #dbe1ea;
+        .summary-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 18px;
         }
 
-        @media (max-width: 860px) {
+        .summary-pill {
+            padding: 10px 12px;
+            border-radius: 999px;
+            background: var(--accent-soft);
+            color: #1c5f3e;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .detail-grid {
+            display: grid;
+            gap: 14px;
+        }
+
+        .detail-card {
+            padding: 16px;
+            border: 1px solid #e5eadf;
+            border-radius: 18px;
+            background: #fff;
+        }
+
+        .detail-card h4 {
+            margin: 0 0 10px;
+            font-size: 16px;
+        }
+
+        .detail-lines {
+            display: grid;
+            gap: 7px;
+            color: #364233;
+            font-size: 14px;
+        }
+
+        .equipment-compare {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            margin-top: 12px;
+        }
+
+        .equipment-side {
+            padding: 14px;
+            border-radius: 16px;
+            background: #f7faf4;
+            border: 1px solid #e5eadf;
+        }
+
+        .equipment-side-label {
+            margin-bottom: 10px;
+            color: var(--muted);
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .equipment-preview {
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .equipment-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 14px;
+            border: 1px solid #d8ddcf;
+            background: white;
+            object-fit: cover;
+            flex: none;
+        }
+
+        .equipment-name {
+            font-weight: 700;
+            line-height: 1.35;
+        }
+
+        .tooltip {
+            position: absolute;
+            left: 0;
+            top: calc(100% + 10px);
+            z-index: 2;
+            width: min(320px, 80vw);
+            padding: 14px;
+            border-radius: 16px;
+            border: 1px solid #d8ddcf;
+            background: rgba(28, 35, 26, 0.96);
+            color: #f7f9f2;
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.2);
+            display: none;
+            white-space: normal;
+        }
+
+        .equipment-preview:hover .tooltip {
+            display: block;
+        }
+
+        .tooltip strong {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 14px;
+        }
+
+        .tooltip-lines {
+            display: grid;
+            gap: 5px;
+            font-size: 12px;
+            line-height: 1.45;
+        }
+
+        .no-changes {
+            color: var(--muted);
+            font-size: 14px;
+        }
+
+        @media (max-width: 980px) {
             form {
                 grid-template-columns: 1fr 1fr;
             }
@@ -117,21 +351,35 @@
             button {
                 grid-column: 1 / -1;
             }
+        }
 
-            .table-wrap {
-                overflow-x: auto;
+        @media (max-width: 720px) {
+            main {
+                padding-inline: 14px;
+            }
+
+            .results-shell,
+            .empty {
+                padding: 20px;
+            }
+
+            .equipment-compare {
+                grid-template-columns: 1fr;
             }
         }
     </style>
 </head>
 <body>
 <main>
-    <h1>Maple History</h1>
+    <section class="hero">
+        <h1>Maple History</h1>
+        <p>전투력 변화가 생긴 날짜를 바로 찾고, 어떤 스탯과 장비가 바뀌었는지 한 번에 확인합니다.</p>
+    </section>
 
-    <form id="search-form">
+    <form id="search-form" class="panel">
         <label>
             캐릭터 이름
-            <input id="character-name" name="characterName" value="어센트심볼" autocomplete="off" required>
+            <input id="character-name" name="characterName" value="카를로렌" autocomplete="off" required>
         </label>
         <label>
             시작일
@@ -144,7 +392,8 @@
         <label>
             프리셋
             <select id="mode" name="mode">
-                <option value="CURRENT">현재 장착</option>
+                <option value="CURRENT">현재 착용</option>
+                <option value="BATTLE">전투용 추정</option>
                 <option value="MAX">최대 전투력</option>
                 <option value="PRESET_1">프리셋 1</option>
                 <option value="PRESET_2">프리셋 2</option>
@@ -155,7 +404,7 @@
     </form>
 
     <div id="status" class="status"></div>
-    <div id="results" class="empty">캐릭터 이름과 날짜를 입력하고 조회하세요.</div>
+    <div id="results" class="panel empty">캐릭터 이름과 날짜를 입력하고 조회해 주세요.</div>
 </main>
 
 <script>
@@ -189,9 +438,9 @@
         });
 
         submitButton.disabled = true;
-        statusEl.textContent = "조회 중...";
-        resultsEl.className = "empty";
-        resultsEl.textContent = "Nexon API에서 데이터를 가져오고 있습니다.";
+        statusEl.textContent = "조회 중입니다...";
+        resultsEl.className = "panel empty";
+        resultsEl.textContent = "날짜별 전투력과 변경 사항을 불러오고 있습니다.";
 
         try {
             const response = await fetch(`/api/v1/characters/${encodeURIComponent(characterName)}/combat-power/trend?${query}`);
@@ -200,10 +449,10 @@
             }
             const body = await response.json();
             renderResults(body);
-            statusEl.textContent = `${body.characterName} (${body.from} ~ ${body.to})`;
+            statusEl.textContent = `${body.characterName} · ${body.from} ~ ${body.to}`;
         } catch (error) {
             statusEl.textContent = "조회에 실패했습니다.";
-            resultsEl.className = "empty";
+            resultsEl.className = "panel empty";
             resultsEl.textContent = error.message;
         } finally {
             submitButton.disabled = false;
@@ -212,39 +461,138 @@
 
     function renderResults(body) {
         if (!body.points || body.points.length === 0) {
-            resultsEl.className = "empty";
+            resultsEl.className = "panel empty";
             resultsEl.textContent = "조회 결과가 없습니다.";
             return;
         }
 
-        resultsEl.className = "table-wrap";
+        resultsEl.className = "panel results-shell";
         resultsEl.innerHTML = `
-            <table>
-                <thead>
-                <tr>
-                    <th>날짜</th>
-                    <th>사용 프리셋</th>
-                    <th>소스별 프리셋</th>
-                    <th>계산 전투력</th>
-                    <th>Nexon 전투력</th>
-                    <th>차이</th>
-                    <th>오차율</th>
-                </tr>
-                </thead>
-                <tbody>
-                ${body.points.map(point => `
-                    <tr>
-                        <td>${point.date}</td>
-                        <td>${point.selectedPresetNo}</td>
-                        <td>${formatSourcePresets(point.selectedSourcePresetNos)}</td>
-                        <td>${numberFormat.format(point.calculatedCombatPower)}</td>
-                        <td>${formatNullable(point.nexonCurrentCombatPower)}</td>
-                        <td>${formatNullable(point.verificationDelta)}</td>
-                        <td>${point.verificationDeltaRate == null ? "-" : percentFormat.format(point.verificationDeltaRate)}</td>
-                    </tr>
-                `).join("")}
-                </tbody>
-            </table>
+            <section>
+                <h2 class="section-title">전투력 추이</h2>
+                <div class="table-wrap">
+                    <table>
+                        <thead>
+                        <tr>
+                            <th>날짜</th>
+                            <th>사용 프리셋</th>
+                            <th>소스별 프리셋</th>
+                            <th>계산 전투력</th>
+                            <th>Nexon 전투력</th>
+                            <th>차이</th>
+                            <th>오차율</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        ${body.points.map(renderTrendRow).join("")}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+            <section>
+                <h2 class="section-title">이전 날짜 대비 변화</h2>
+                <div class="status">비교 기준: ${formatModeLabel(body.mode)} 프리셋 기준으로 각 날짜를 비교합니다.</div>
+                <div class="change-list">
+                    ${renderChangeCards(body.points)}
+                </div>
+            </section>
+        `;
+    }
+
+    function renderTrendRow(point) {
+        return `
+            <tr>
+                <td>${point.date}</td>
+                <td>${point.selectedPresetNo}</td>
+                <td>${formatSourcePresets(point.selectedSourcePresetNos)}</td>
+                <td>${numberFormat.format(point.calculatedCombatPower)}</td>
+                <td>${formatNullable(point.nexonCurrentCombatPower)}</td>
+                <td class="${deltaClass(point.verificationDelta)}">${formatNullable(point.verificationDelta)}</td>
+                <td>${point.verificationDeltaRate == null ? "-" : percentFormat.format(point.verificationDeltaRate)}</td>
+            </tr>
+        `;
+    }
+
+    function renderChangeCards(points) {
+        const changedPoints = points.filter(point => point.changeFromPrevious);
+        if (changedPoints.length === 0) {
+            return `<div class="no-changes">비교할 이전 날짜가 없거나 변화 정보가 없습니다.</div>`;
+        }
+        return changedPoints.map(point => {
+            const change = point.changeFromPrevious;
+            return `
+                <article class="change-card">
+                    <div class="change-head">
+                        <h3>${point.date}</h3>
+                        <span>${change.previousDate} 대비</span>
+                    </div>
+                    <div class="summary-grid">
+                        ${change.totalChanges.length > 0
+                            ? change.totalChanges.map(renderSummaryPill).join("")
+                            : `<div class="summary-pill">총 변화 없음</div>`}
+                    </div>
+                    <div class="detail-grid">
+                        ${change.detailChanges.length > 0
+                            ? change.detailChanges.map(renderDetailCard).join("")
+                            : `<div class="detail-card"><div class="no-changes">개별 변화가 없습니다.</div></div>`}
+                    </div>
+                </article>
+            `;
+        }).join("");
+    }
+
+    function renderSummaryPill(change) {
+        return `<div class="summary-pill">${escapeHtml(change.statName)}: ${escapeHtml(change.beforeValue)} -> ${escapeHtml(change.afterValue)} (${escapeHtml(change.deltaValue)})</div>`;
+    }
+
+    function renderDetailCard(change) {
+        if (change.kind === "EQUIPMENT") {
+            return `
+                <section class="detail-card">
+                    <h4>${escapeHtml(change.label)}</h4>
+                    <div class="detail-lines">${change.lines.map(line => `<div>${escapeHtml(line)}</div>`).join("")}</div>
+                    <div class="equipment-compare">
+                        ${renderEquipmentSide("이전", change.beforeEquipment)}
+                        ${renderEquipmentSide("현재", change.afterEquipment)}
+                    </div>
+                </section>
+            `;
+        }
+
+        return `
+            <section class="detail-card">
+                <h4>${escapeHtml(change.sourceName)}</h4>
+                <div class="detail-lines">
+                    ${change.lines.map(line => `<div>${escapeHtml(line)}</div>`).join("")}
+                </div>
+            </section>
+        `;
+    }
+
+    function renderEquipmentSide(label, equipment) {
+        if (!equipment) {
+            return `
+                <div class="equipment-side">
+                    <div class="equipment-side-label">${label}</div>
+                    <div class="no-changes">장비 없음</div>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="equipment-side">
+                <div class="equipment-side-label">${label}</div>
+                <div class="equipment-preview">
+                    <img class="equipment-icon" src="${escapeHtml(equipment.iconUrl || "")}" alt="${escapeHtml(equipment.name)}">
+                    <div class="equipment-name">${escapeHtml(equipment.name)}</div>
+                    <div class="tooltip">
+                        <strong>${escapeHtml(equipment.name)}</strong>
+                        <div class="tooltip-lines">
+                            ${(equipment.tooltipLines || []).map(line => `<div>${escapeHtml(line)}</div>`).join("")}
+                        </div>
+                    </div>
+                </div>
+            </div>
         `;
     }
 
@@ -260,12 +608,40 @@
             ITEM_EQUIPMENT: "장비",
             CASH_ITEM_EQUIPMENT: "캐시",
             HYPER_STAT: "하이퍼",
-            ABILITY: "어빌",
+            ABILITY: "어빌리티",
             UNION_RAIDER: "유니온"
         };
         return Object.entries(sourcePresetNos)
             .map(([source, presetNo]) => `${labels[source] || source} ${presetNo}`)
             .join(" / ");
+    }
+
+    function formatModeLabel(mode) {
+        const labels = {
+            CURRENT: "현재 착용",
+            BATTLE: "전투용 추정",
+            MAX: "최대 전투력",
+            PRESET_1: "프리셋 1",
+            PRESET_2: "프리셋 2",
+            PRESET_3: "프리셋 3"
+        };
+        return labels[mode] || mode;
+    }
+
+    function deltaClass(value) {
+        if (value == null || value === 0) {
+            return "";
+        }
+        return value > 0 ? "delta-positive" : "delta-negative";
+    }
+
+    function escapeHtml(value) {
+        return String(value ?? "")
+            .replaceAll("&", "&amp;")
+            .replaceAll("<", "&lt;")
+            .replaceAll(">", "&gt;")
+            .replaceAll("\"", "&quot;")
+            .replaceAll("'", "&#39;");
     }
 </script>
 </body>
